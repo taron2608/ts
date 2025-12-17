@@ -1,6 +1,8 @@
 import os
 import random
 import uuid
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,7 +18,19 @@ user_states = {}
 organizer_games = {}
 bot_username = None
 
-def generate_game_id():
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+    
+    def generate_game_id():
     return str(uuid.uuid4())[:8]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,12 +174,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "(например: «Новый год 2025» или «Офис»):"
         )
     
-    elif data.startswith("select_game_"):
-        game_id = data.replace("select_game_", "")
-        if game_id in games:
-            user_states[user_id]["state"] = "menu"
-            user_states[user_id]["active_game"] = game_id
-            await show_game_menu(context, game_id, query.edit_message_text)
     
     elif data.startswith("resume_game_"):
         game_id = data.replace("resume_game_", "")
@@ -210,8 +218,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await run_game(query, context, game_id, user_id)
     
     elif data == "back_to_games":
-        user_states[user_id]["state"] = "menu"
-        await show_organizer_menu(context, user_id, query.edit_message_text, edit=True)
+    if user_id not in user_states:
+        user_states[user_id] = {"role": "organizer", "state": "menu"}
+
+    user_states[user_id]["state"] = "menu"
+    await show_organizer_menu(context, user_id, query.edit_message_text, edit=True)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_username
@@ -450,8 +461,10 @@ def main():
     
     if not token:
         print("🎅 Ошибка: BOT_TOKEN не установлен!")
-        print("Добавьте токен бота в переменные окружения.")
         return
+
+    # 🔥 HTTP-сервер для Render Web Service
+    threading.Thread(target=run_http_server, daemon=True).start()
     
     app = ApplicationBuilder().token(token).build()
     
