@@ -30,7 +30,7 @@ def run_http_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
     
-    def generate_game_id():
+def generate_game_id():
     return str(uuid.uuid4())[:8]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
