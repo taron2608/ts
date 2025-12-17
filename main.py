@@ -218,11 +218,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await run_game(query, context, game_id, user_id)
     
     elif data == "back_to_games":
-    if user_id not in user_states:
-        user_states[user_id] = {"role": "organizer", "state": "menu"}
+        if user_id not in user_states:
+            user_states[user_id] = {"role": "organizer", "state": "menu"}
 
-    user_states[user_id]["state"] = "menu"
-    await show_organizer_menu(context, user_id, query.edit_message_text, edit=True)
+        user_states[user_id]["state"] = "menu"
+        await show_organizer_menu(context, user_id, query.edit_message_text, edit=True)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global bot_username
