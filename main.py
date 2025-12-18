@@ -251,7 +251,7 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# ------------------ ДЕТАЛИ ИГРЫ ------------------
+# ------------------ ДЕТАЛИ ИГРЫ (исправлено - кнопка пожеланий для всех участников) ------------------
 async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -307,9 +307,9 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
         ])
     
-    # Кнопка пожеланий для всех участников
+    # Кнопка пожеланий для ВСЕХ участников (включая организатора)
     if user_id in game["players"]:
-        wish_button_text = f"{EMOJI['preferences']} Изменить пожелания" if has_wishes else f"{EMOJI['wish']} Указать пожелания"
+        wish_button_text = f"{EMOJI['preferences']} Мои пожелания" if has_wishes else f"{EMOJI['wish']} Указать пожелания"
         keyboard.append([
             InlineKeyboardButton(wish_button_text, callback_data=f"wish_{game_id}")
         ])
@@ -495,6 +495,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
             ],
             [InlineKeyboardButton(f"{EMOJI['play']} Запустить распределение", callback_data=f"start_game_{game_id}")],
+            [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
             [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
             [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
         ]
@@ -1091,9 +1092,13 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     uid,
                     f"{EMOJI['info']} <b>Напоминание о пожеланиях</b>\n\n"
                     f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' началась!\n\n"
-                    f"{EMOJI['santa']} Если ты ещё не указал(а) свои пожелания для подарка, "
-                    f"твой Тайный Санта не будет знать, что тебе подарить.\n\n"
-                    f"Ты можешь зайти в список своих игр и добавить пожелания!",
+                    f"{EMOJI['santa']} К сожалению, ты не указал(а) свои пожелания для подарка.\n"
+                    f"Твой Тайный Санта не будет знать, что тебе подарить.\n\n"
+                    f"{EMOJI['wish']} <b>Что можно сделать:</b>\n"
+                    f"• Напиши своему Санте в личные сообщения\n"
+                    f"• Расскажи о своих интересах и предпочтениях\n"
+                    f"• Предложи идеи для подарка\n\n"
+                    f"Удачного обмена подарками! 🎁",
                     parse_mode="HTML"
                 )
             except:
@@ -1213,7 +1218,7 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# ------------------ ОБРАБОТКА ПРИГЛАСИТЕЛЬНОЙ ССЫЛКИ ------------------
+# ------------------ ОБРАБОТКА ПРИГЛАСИТЕЛЬНОЙ ССЫЛКИ (с отправкой информационного сообщения) ------------------
 async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start с параметром (пригласительная ссылка)"""
     args = context.args
@@ -1277,24 +1282,45 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
         
-        # Отправляем приветственное сообщение с информацией о пожеланиях
+        # Отправляем стандартное сообщение о вступлении
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
             f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
             f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
             f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
-            f"{EMOJI['wish']} <b>Важная информация:</b>\n"
-            f"Чтобы твой Тайный Санта знал, что тебе дарить, ты можешь указать свои пожелания!\n\n"
-            f"Нажми на кнопку ниже, чтобы указать:\n"
-            f"• Что бы ты хотел(а) получить\n"
-            f"• Что бы ты не хотел(а) получать\n\n"
-            f"Эти пожелания увидит только твой Тайный Санта после распределения.",
+            f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
                 [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
             ])
         )
+        
+        # ОТДЕЛЬНО отправляем информационное сообщение о пожеланиях (через 1 секунду)
+        async def send_info_message():
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"{EMOJI['info']} <b>Важная информация!</b>\n\n"
+                    f"🎯 <b>Укажи свои пожелания для подарка!</b>\n\n"
+                    f"Чтобы твой Тайный Санта знал, что тебе дарить, ты можешь указать свои пожелания:\n\n"
+                    f"🎁 <b>Что бы ты хотел(а) получить</b>\n"
+                    f"🙅 <b>Что бы ты НЕ хотел(а) получать</b>\n\n"
+                    f"Эти пожелания увидит только твой Тайный Санта после распределения.\n\n"
+                    f"<i>Зайди в свои игры и нажми кнопку \"Указать пожелания\" для игры:</i>\n"
+                    f"<b>{escape_markdown(game['name'])}</b>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
+                        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")]
+                    ])
+                )
+            except Exception as e:
+                print(f"Ошибка отправки информационного сообщения: {e}")
+        
+        # Запускаем отправку с небольшой задержкой
+        import asyncio
+        asyncio.create_task(send_info_message())
+        
     else:
         await start(update, context)
 
