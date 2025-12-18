@@ -1,8 +1,11 @@
 [project]
-name = "repl-nix-workspace"
+name = "secret-santa-bot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telegram Secret Santa bot with webhook and persistent storage"
 requires-python = ">=3.11"
+
 dependencies = [
-    "python-telegram-bot>=22.5",
+    "python-telegram-bot==22.5",
+    "fastapi>=0.110",
+    "uvicorn>=0.27"
 ]
