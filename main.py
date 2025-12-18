@@ -60,25 +60,21 @@ def escape_markdown(text):
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
     return ''.join(['\\' + char if char in escape_chars else char for char in text])
 
-def format_user_name(user_info):
-    """Форматирование имени пользователя с упоминанием"""
+def get_user_html_mention(user_id, user_info):
+    """Возвращает HTML-упоминание пользователя"""
     if not user_info:
         return "Анонимный Санта"
     
     name = ""
     if user_info.first_name:
-        name = user_info.first_name
+        name = escape_markdown(user_info.first_name)
         if user_info.last_name:
-            name += f" {user_info.last_name}"
+            name += f" {escape_markdown(user_info.last_name)}"
     elif user_info.username:
         name = f"@{user_info.username}"
     else:
         name = "Анонимный Санта"
     
-    return escape_markdown(name)
-
-def get_user_mention(user_id, name):
-    """Возвращает кликабельное упоминание пользователя"""
     return f'<a href="tg://user?id={user_id}">{name}</a>'
 
 # ------------------ ХРАНИЛИЩЕ ------------------
@@ -131,7 +127,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     welcome_text = (
-        f"{EMOJI['gift']} *Тайный Санта*\n\n"
+        f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
         f"Создай свою игру или присоединись к существующей.\n"
         f"Когда все соберутся — запусти распределение!"
     )
@@ -145,7 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         welcome_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,7 +151,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     welcome_text = (
-        f"{EMOJI['gift']} *Главное меню*\n\n"
+        f"{EMOJI['gift']} <b>Главное меню</b>\n\n"
         f"Создай свою игру или присоединись к существующей.\n"
         f"Когда все соберутся — запусти распределение!"
     )
@@ -169,7 +165,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         welcome_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,23 +198,23 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not user_games:
         await query.edit_message_text(
-            f"{EMOJI['tree']} *У тебя пока нет активных игр*\n\n"
+            f"{EMOJI['tree']} <b>У тебя пока нет активных игр</b>\n\n"
             f"Создай новую игру или присоединись к существующей!",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
             ])
         )
         return
     
-    text = f"{EMOJI['list']} *Твои игры*\n\n"
+    text = f"{EMOJI['list']} <b>Твои игры</b>\n\n"
     buttons = []
     
     for game in user_games[:10]:
         is_owner = f"{EMOJI['crown']} " if game["owner"] == user_id else ""
         game_name = escape_markdown(game["name"])
         
-        text += f"{is_owner}*{game_name}*\n"
+        text += f"{is_owner}<b>{game_name}</b>\n"
         text += f"   {EMOJI['users']} {len(game['players'])} | {EMOJI['money']} {game['amount']} ₽\n\n"
         
         buttons.append([
@@ -235,7 +231,7 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ------------------ ДЕТАЛИ ИГРЫ ------------------
@@ -260,9 +256,9 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game_name = escape_markdown(game["name"])
     
     text = (
-        f"{EMOJI['tree']} *{game_name}*\n"
-        f"{EMOJI['money']} *Бюджет:* {game['amount']} ₽\n"
-        f"{EMOJI['users']} *Участников:* {len(game['players'])}"
+        f"{EMOJI['tree']} <b>{game_name}</b>\n"
+        f"{EMOJI['money']} <b>Бюджет:</b> {game['amount']} ₽\n"
+        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}"
     )
     
     keyboard = []
@@ -294,7 +290,7 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ------------------ ПРИГЛАШЕНИЕ ------------------
@@ -313,11 +309,11 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game_name = escape_markdown(game["name"])
     
     text = (
-        f"{EMOJI['gift']} *Приглашение в игру*\n\n"
-        f"{EMOJI['tree']} *{game_name}*\n"
-        f"{EMOJI['money']} *Сумма подарка:* {game['amount']} ₽\n"
-        f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
-        f"{EMOJI['link']} *Ссылка для приглашения:*\n"
+        f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
+        f"{EMOJI['tree']} <b>{game_name}</b>\n"
+        f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
+        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+        f"{EMOJI['link']} <b>Ссылка для приглашения:</b>\n"
         f"{invite_link}\n\n"
         f"{EMOJI['snowflake']} Просто отправь эту ссылку друзьям!"
     )
@@ -330,7 +326,7 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ------------------ СОЗДАНИЕ ИГРЫ ------------------
@@ -343,16 +339,17 @@ async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     await query.edit_message_text(
-        f"{EMOJI['create']} *Создание игры*\n\n"
+        f"{EMOJI['create']} <b>Создание игры</b>\n\n"
         f"Придумай название для своей игры:\n"
-        f"_Например:_ Рождественское чудо\n\n"
+        f"<i>Например:</i> Рождественское чудо\n\n"
         f"Введи название:\n\n"
-        f"{EMOJI['info']} _Используй /cancel для отмены_",
-        parse_mode="Markdown",
+        f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
         ])
     )
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user = get_user(user_id)
@@ -370,7 +367,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user["state"] = "wait_game_amount"
         save_storage()
         
-        # БЕЗ Markdown форматирования
+        # ПРОСТОЕ сообщение без форматирования
         await update.message.reply_text(
             f"{EMOJI['money']} Сумма подарка\n\nВведи сумму в рублях:\n\n"
             f"{EMOJI['info']} Используй /cancel для отмены",
@@ -434,11 +431,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
         
-        game_name = user["tmp_name"]  # Без escape_markdown
+        game_name = escape_markdown(user["tmp_name"])
         
         storage["games"][game_id] = {
             "id": game_id,
-            "name": game_name,
+            "name": user["tmp_name"],
             "amount": amount_str,
             "owner": user_id,
             "players": [user_id],
@@ -452,14 +449,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user.setdefault("games", []).append(game_id)
         save_storage()
 
-        # Отправляем результат БЕЗ Markdown
+        # Отправляем результат БЕЗ форматирования
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
         
         text = (
-            f"{EMOJI['tree']}✨ Игра «{game_name}» готова!\n\n"
-            f"{EMOJI['money']} Сумма: {amount_str} ₽\n"
-            f"{EMOJI['users']} Участников: 1 (включая тебя)\n\n"
-            f"{EMOJI['link']} Ссылка для друзей:\n"
+            f"{EMOJI['tree']}✨ <b>Игра «{game_name}» готова!</b>\n\n"
+            f"{EMOJI['money']} <b>Сумма:</b> {amount_str} ₽\n"
+            f"{EMOJI['users']} <b>Участников:</b> 1 (включая тебя)\n\n"
+            f"{EMOJI['link']} <b>Ссылка для друзей:</b>\n"
             f"{invite_link}\n\n"
             f"{EMOJI['snowflake']} Отправь ссылку друзьям!\n"
             f"{EMOJI['santa']} Когда все соберутся — запусти распределение!"
@@ -477,7 +474,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
         )
         return
         
@@ -521,11 +519,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_name = escape_markdown(game["name"])
         
         await update.message.reply_text(
-            f"{EMOJI['check']} Ты присоединился!\n\n"
-            f"{EMOJI['tree']} {game_name}\n"
-            f"{EMOJI['money']} Сумма: {game['amount']} ₽\n"
-            f"{EMOJI['users']} Участников: {len(game['players'])}\n\n"
+            f"{EMOJI['check']} <b>Ты присоединился!</b>\n\n"
+            f"{EMOJI['tree']} <b>{game_name}</b>\n"
+            f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+            f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
             f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
             ])
@@ -595,10 +594,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_name = escape_markdown(game["name"])
 
         await update.message.reply_text(
-            f"{EMOJI['check']} Сумма обновлена!\n\n"
-            f"{EMOJI['tree']} {game_name}\n"
-            f"{EMOJI['money']} Бюджет: {game['amount']} ₽\n"
-            f"{EMOJI['users']} Участников: {len(game['players'])}",
+            f"{EMOJI['check']} <b>Сумма обновлена!</b>\n\n"
+            f"{EMOJI['tree']} <b>{game_name}</b>\n"
+            f"{EMOJI['money']} <b>Бюджет:</b> {game['amount']} ₽\n"
+            f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{EMOJI['back']} К игре", callback_data=f"game_{game_id}")],
                 [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
@@ -616,10 +616,10 @@ async def join_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     await query.edit_message_text(
-        f"{EMOJI['join']} *Присоединение по коду*\n\n"
+        f"{EMOJI['join']} <b>Присоединение по коду</b>\n\n"
         f"Получи код игры у её создателя и введи его:\n\n"
-        f"{EMOJI['info']} _Используй /cancel для отмены_",
-        parse_mode="Markdown",
+        f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
         ])
@@ -643,24 +643,24 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Собираем информацию об участниках
-    players_text = f"{EMOJI['users']} *Участники ({len(game['players'])}):*\n\n"
+    # Собираем информацию об участниках в HTML
+    players_text = f"{EMOJI['users']} <b>Участники ({len(game['players'])}):</b>\n\n"
     
     buttons = []
     
     for i, uid in enumerate(game["players"], 1):
         try:
             user_info = await context.bot.get_chat(int(uid))
-            name = format_user_name(user_info)
-            mention = get_user_mention(uid, name)
+            mention = get_user_html_mention(uid, user_info)
             
             if uid == game["owner"]:
-                players_text += f"{i}. {EMOJI['crown']} {mention} (создатель)\n"
+                players_text += f"{i}. {EMOJI['crown']} {mention} <i>(создатель)</i>\n"
             else:
                 players_text += f"{i}. {EMOJI['user']} {mention}\n"
             
             # Кнопка удаления для владельца (кроме себя)
             if query.from_user.id == int(game["owner"]) and uid != game["owner"]:
+                name = escape_markdown(user_info.first_name or user_info.username or f"Игрок {i}")
                 buttons.append([
                     InlineKeyboardButton(
                         f"{EMOJI['cross']} Удалить {name[:15]}",
@@ -673,7 +673,7 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             players_text += f"{i}. Игрок {i}\n"
     
     game_name = escape_markdown(game["name"])
-    text = f"{EMOJI['tree']} *{game_name}*\n\n{players_text}"
+    text = f"{EMOJI['tree']} <b>{game_name}</b>\n\n{players_text}"
 
     # Кнопка назад
     buttons.append([
@@ -684,7 +684,7 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=True
     )
 
@@ -698,7 +698,7 @@ async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in game["players"]:
         try:
             user_info = await context.bot.get_chat(int(uid))
-            user_name = format_user_name(user_info)
+            user_name = escape_markdown(user_info.first_name or user_info.username or "Игрок")
             game["players"].remove(uid)
             save_storage()
             
@@ -706,9 +706,10 @@ async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     uid,
-                    f"{EMOJI['cross']} *Тебя удалили из игры*\n\n"
+                    f"{EMOJI['cross']} <b>Тебя удалили из игры</b>\n\n"
                     f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
-                    f"{EMOJI['info']} Создатель игры принял решение об твоем удалении."
+                    f"{EMOJI['info']} Создатель игры принял решение об твоем удалении.",
+                    parse_mode="HTML"
                 )
             except:
                 pass
@@ -727,7 +728,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     game_id = query.data.split("_")[2]
-    game = storage["games"][game_id]
+    game = storage["games"].get(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
@@ -764,19 +765,18 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for giver, receiver in pairs.items():
         try:
             receiver_info = await context.bot.get_chat(receiver)
-            receiver_name = format_user_name(receiver_info)
-            receiver_mention = get_user_mention(receiver, receiver_name)
+            receiver_mention = get_user_html_mention(receiver, receiver_info)
             
             await context.bot.send_message(
                 giver,
-                f"{EMOJI['gift']} *Твой Тайный Санта!*\n\n"
-                f"{EMOJI['star']} *Твой получатель:* {receiver_mention}\n"
-                f"{EMOJI['money']} *Сумма подарка:* {game['amount']} ₽\n"
-                f"{EMOJI['tree']} *Игра:* {escape_markdown(game['name'])}\n\n"
-                f"{EMOJI['santa']} *Совет Санты:*\n"
+                f"{EMOJI['gift']} <b>Твой Тайный Санта!</b>\n\n"
+                f"{EMOJI['star']} <b>Твой получатель:</b> {receiver_mention}\n"
+                f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
+                f"{EMOJI['tree']} <b>Игра:</b> {escape_markdown(game['name'])}\n\n"
+                f"{EMOJI['santa']} <b>Совет Санты:</b>\n"
                 f"Узнай интересы получателя и прояви креативность!\n\n"
                 f"Счастливого Рождества! 🎄",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True
             )
             success_count += 1
@@ -785,33 +785,34 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Отправляем организатору полный список пар
     try:
-        pairs_list = f"{EMOJI['mail']} *Полный список пар (только для тебя):*\n\n"
+        pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя):</b>\n\n"
         for giver, receiver in pairs.items():
             try:
                 giver_info = await context.bot.get_chat(giver)
                 receiver_info = await context.bot.get_chat(receiver)
-                giver_name = format_user_name(giver_info)
-                receiver_name = format_user_name(receiver_info)
+                giver_mention = get_user_html_mention(giver, giver_info)
+                receiver_mention = get_user_html_mention(receiver, receiver_info)
                 
-                pairs_list += f"• {giver_name} → {receiver_name}\n"
+                pairs_list += f"• {giver_mention} → {receiver_mention}\n"
             except:
                 pairs_list += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
         
         await context.bot.send_message(
             game["owner"],
             pairs_list,
-            parse_mode="Markdown"
+            parse_mode="HTML",
+            disable_web_page_preview=True
         )
     except Exception as e:
         print(f"Ошибка отправки списка пар организатору: {e}")
 
-    # Удаляем игру из общего списка (но оставляем в памяти для пар)
+    # Удаляем игру из общего списка
     await query.edit_message_text(
-        f"{EMOJI['check']} *Распределение проведено!*\n\n"
+        f"{EMOJI['check']} <b>Распределение проведено!</b>\n\n"
         f"Участникам отправлены сообщения с их получателями.\n"
         f"Тебе отправлен полный список пар.\n\n"
-        f"{EMOJI['lock']} *Игра завершена и удалена из списка активных.*",
-        parse_mode="Markdown",
+        f"{EMOJI['lock']} <b>Игра завершена и удалена из списка активных.</b>",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
             [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
@@ -840,8 +841,9 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     uid,
-                    f"{EMOJI['info']} *Игра удалена*\n\n"
-                    f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' была удалена создателем."
+                    f"{EMOJI['info']} <b>Игра удалена</b>\n\n"
+                    f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' была удалена создателем.",
+                    parse_mode="HTML"
                 )
             except:
                 pass
@@ -850,9 +852,9 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     await query.edit_message_text(
-        f"{EMOJI['check']} *Игра удалена*\n\n"
+        f"{EMOJI['check']} <b>Игра удалена</b>\n\n"
         f"Игра '{escape_markdown(game['name'])}' успешно удалена.",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
             [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
@@ -876,12 +878,12 @@ async def edit_amount_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     await query.edit_message_text(
-        f"{EMOJI['edit']} *Изменение суммы*\n\n"
+        f"{EMOJI['edit']} <b>Изменение суммы</b>\n\n"
         f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
         f"{EMOJI['money']} Текущая сумма: {game['amount']} ₽\n\n"
         f"Введи новую сумму:\n\n"
-        f"{EMOJI['info']} _Используй /cancel для отмены_",
-        parse_mode="Markdown",
+        f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
         ])
@@ -899,7 +901,7 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_storage()
 
     welcome_text = (
-        f"{EMOJI['gift']} *Тайный Санта*\n\n"
+        f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
         f"Создай свою игру или присоединись к существующей.\n"
         f"Когда все соберутся — запусти распределение!"
     )
@@ -913,7 +915,7 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         welcome_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ------------------ ОБРАБОТКА ПРИГЛАСИТЕЛЬНОЙ ССЫЛКИ ------------------
@@ -926,9 +928,9 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         
         if not game:
             await update.message.reply_text(
-                f"{EMOJI['cross']} *Игра не найдена!*\n\n"
+                f"{EMOJI['cross']} <b>Игра не найдена!</b>\n\n"
                 f"Ссылка устарела или игра была удалена.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
@@ -937,9 +939,9 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         
         if game["started"]:
             await update.message.reply_text(
-                f"{EMOJI['cross']} *Игра уже началась!*\n\n"
+                f"{EMOJI['cross']} <b>Игра уже началась!</b>\n\n"
                 f"Распределение уже проведено, присоединиться нельзя.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
@@ -950,12 +952,12 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         
         if user_id in game["players"]:
             await update.message.reply_text(
-                f"{EMOJI['info']} *Ты уже в игре!*\n\n"
-                f"{EMOJI['tree']} *{escape_markdown(game['name'])}*\n"
-                f"{EMOJI['money']} *Сумма:* {game['amount']} ₽\n"
-                f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
+                f"{EMOJI['info']} <b>Ты уже в игре!</b>\n\n"
+                f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
+                f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+                f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
                 f"Ждем начала распределения!",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
@@ -972,21 +974,21 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         try:
             await context.bot.send_message(
                 game["owner"],
-                f"{EMOJI['bell']} *Новый участник!*\n\n"
+                f"{EMOJI['bell']} <b>Новый участник!</b>\n\n"
                 f"К игре '{escape_markdown(game['name'])}' присоединился новый участник.\n"
                 f"{EMOJI['users']} Теперь участников: {len(game['players'])}",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except:
             pass
         
         await update.message.reply_text(
-            f"{EMOJI['check']} *Ты присоединился к игре!*\n\n"
-            f"{EMOJI['tree']} *{escape_markdown(game['name'])}*\n"
-            f"{EMOJI['money']} *Сумма:* {game['amount']} ₽\n"
-            f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
+            f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
+            f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
+            f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+            f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
             f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
             ])
