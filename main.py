@@ -425,29 +425,62 @@ async def update_message_with_game_menu(message_obj, game_id):
 
 # ---------------- WEBHOOK & FASTAPI ----------------
 
+# Глобальная переменная для Application
+application = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan контекст для FastAPI"""
+    global application
+    
     # При запуске приложения
+    print("🚀 Инициализация бота...")
+    
+    # Создаем и инициализируем Application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(create_game_cb, pattern="create_game"))
+    application.add_handler(CallbackQueryHandler(join_game_cb, pattern="join_game"))
+    application.add_handler(CallbackQueryHandler(players_cb, pattern="players_"))
+    application.add_handler(CallbackQueryHandler(kick_cb, pattern="kick_"))
+    application.add_handler(CallbackQueryHandler(delete_cb, pattern="delete_"))
+    application.add_handler(CallbackQueryHandler(edit_amount_cb, pattern="edit_amount_"))
+    application.add_handler(CallbackQueryHandler(start_game_cb, pattern="start_game_"))
+    application.add_handler(CallbackQueryHandler(back_cb, pattern="back_"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    
+    # Инициализируем Application
+    await application.initialize()
+    
+    # Устанавливаем webhook
     if WEBHOOK_URL:
         await application.bot.set_webhook(WEBHOOK_URL)
         print(f"✅ Webhook установлен на {WEBHOOK_URL}")
     else:
         print("⚠️ WEBHOOK_URL не установлен. Бот может не работать.")
     
+    print("✅ Бот инициализирован и готов к работе!")
+    
     yield
     
-    # При остановке приложения (опционально)
-    # if WEBHOOK_URL:
-    #     await application.bot.delete_webhook()
-    #     print("Webhook удален")
+    # При остановке приложения
+    print("🛑 Остановка бота...")
+    if application:
+        await application.shutdown()
+    print("✅ Бот остановлен")
 
 app = FastAPI(lifespan=lifespan)
-application = Application.builder().token(BOT_TOKEN).build()
 
 @app.post("/webhook")
 async def webhook(req: Request):
     """Endpoint для получения обновлений от Telegram"""
+    global application
+    
+    if not application:
+        return {"ok": False, "error": "Application not initialized"}, 500
+    
     try:
         data = await req.json()
         update = Update.de_json(data, application.bot)
@@ -480,21 +513,8 @@ async def status():
 # ---------------- MAIN ----------------
 
 def main():
-    """Настройка и запуск приложения"""
-    # Регистрация обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(create_game_cb, pattern="create_game"))
-    application.add_handler(CallbackQueryHandler(join_game_cb, pattern="join_game"))
-    application.add_handler(CallbackQueryHandler(players_cb, pattern="players_"))
-    application.add_handler(CallbackQueryHandler(kick_cb, pattern="kick_"))
-    application.add_handler(CallbackQueryHandler(delete_cb, pattern="delete_"))
-    application.add_handler(CallbackQueryHandler(edit_amount_cb, pattern="edit_amount_"))
-    application.add_handler(CallbackQueryHandler(start_game_cb, pattern="start_game_"))
-    application.add_handler(CallbackQueryHandler(back_cb, pattern="back_"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
-    # Запуск FastAPI приложения
-    print(f"🚀 Запуск бота на порту {PORT}")
+    """Запуск FastAPI приложения"""
+    print(f"🚀 Запуск FastAPI сервера на порту {PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
