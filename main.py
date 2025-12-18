@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 import random
+import time
 from contextlib import asynccontextmanager
 from telegram import (
     Update,
@@ -23,7 +24,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 10000))
 STORAGE_FILE = "storage.json"
-FAQ_CHANNEL_LINK = "https://t.me/ssr_faq"  # Ссылка на ваш канал
+FAQ_CHANNEL_LINK = "https://t.me/ssr_faq"
 
 # ------------------ ЭМОДЗИ ------------------
 EMOJI = {
@@ -110,12 +111,15 @@ def get_user(uid):
         }
     return storage["users"][uid_str]
 
-def cleanup_finished_games():
-    """Очищает завершенные игры из хранилища"""
+def cleanup_old_games(days_old=30):
+    """Очищает игры, завершенные более N дней назад (автоматически при старте)"""
+    current_time = time.time()
     games_to_remove = []
+    
     for game_id, game in storage["games"].items():
-        if game["started"]:
-            games_to_remove.append(game_id)
+        if game.get("started") and game.get("finished_time"):
+            if current_time - game["finished_time"] > (days_old * 24 * 60 * 60):
+                games_to_remove.append(game_id)
     
     for game_id in games_to_remove:
         for uid, user_data in storage["users"].items():
@@ -130,7 +134,7 @@ def cleanup_finished_games():
     
     if games_to_remove:
         save_storage()
-        print(f"Удалено завершенных игр: {len(games_to_remove)}")
+        print(f"Удалено старых игр (>{days_old} дней): {len(games_to_remove)}")
 
 # ------------------ КОМАНДЫ ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,22 +235,46 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = str(query.from_user.id)
-    cleanup_finished_games()
     
+    # Находим все активные игры пользователя
     user_games = []
     for game_id, game in storage["games"].items():
-        if user_id in game["players"] and not game["started"]:
+        if user_id in game["players"] and not game.get("started", False):
             user_games.append(game)
     
     if not user_games:
-        await query.edit_message_text(
-            f"{EMOJI['tree']} <b>У тебя пока нет активных игр</b>\n\n"
-            f"Создай новую игру или присоединись к существующей!",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
-            ])
-        )
+        # Показываем завершенные игры отдельно
+        finished_games = []
+        for game_id, game in storage["games"].items():
+            if user_id in game["players"] and game.get("started", False):
+                finished_games.append(game)
+        
+        if finished_games:
+            text = f"{EMOJI['check']} <b>Завершенные игры</b>\n\n"
+            for game in finished_games[:5]:
+                game_name = escape_markdown(game["name"])
+                text += f"🎄 <b>{game_name}</b>\n"
+                text += f"   {EMOJI['money']} {game['amount']} ₽ | {EMOJI['users']} {len(game['players'])}\n\n"
+            
+            text += f"{EMOJI['info']} Активных игр нет. Создайте новую!"
+            
+            await query.edit_message_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+                    [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                f"{EMOJI['tree']} <b>У тебя пока нет активных игр</b>\n\n"
+                f"Создай новую игру или присоединись к существующей!",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+                ])
+            )
         return
     
     text = f"{EMOJI['list']} <b>Твои игры</b>\n\n"
@@ -255,11 +283,20 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for game in user_games[:10]:
         is_owner = f"{EMOJI['crown']} " if game["owner"] == user_id else ""
         game_name = escape_markdown(game["name"])
+        
         text += f"{is_owner}<b>{game_name}</b>\n"
         text += f"   {EMOJI['users']} {len(game['players'])} | {EMOJI['money']} {game['amount']} ₽\n\n"
-        buttons.append([InlineKeyboardButton(f"{game_name[:15]}...", callback_data=f"game_{game['id']}")])
+        
+        buttons.append([
+            InlineKeyboardButton(
+                f"{game_name[:15]}...",
+                callback_data=f"game_{game['id']}"
+            )
+        ])
     
-    buttons.append([InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")])
+    buttons.append([
+        InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")
+    ])
     
     await query.edit_message_text(
         text,
@@ -275,7 +312,7 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game_id = query.data.split("_")[1]
     game = storage["games"].get(game_id)
     
-    if not game or game["started"]:
+    if not game or game.get("started", False):
         await query.edit_message_text(
             f"{EMOJI['cross']} Игра не найдена или уже завершена",
             reply_markup=InlineKeyboardMarkup([
@@ -439,7 +476,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "owner": user_id,
             "players": [user_id],
             "started": False,
-            "pairs": {}
+            "pairs": {},
+            "created_time": time.time()
         }
 
         del user["tmp_name"]
@@ -999,7 +1037,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"{EMOJI['cross']} Нужно минимум 2 участника!", show_alert=True)
         return
 
-    if game["started"]:
+    if game.get("started", False):
         await query.answer(f"{EMOJI['info']} Распределение уже проведено!", show_alert=True)
         return
 
@@ -1014,6 +1052,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     game["pairs"] = pairs
     game["started"] = True
+    game["finished_time"] = time.time()  # Добавляем время завершения
     save_storage()
 
     success_count = 0
@@ -1102,7 +1141,8 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{EMOJI['check']} <b>Распределение проведено!</b>\n\n"
         f"Участникам отправлены сообщения с их получателями.\n"
         f"Тебе отправлен полный список пар.\n\n"
-        f"{EMOJI['lock']} <b>Игра завершена и удалена из списка активных.</b>",
+        f"{EMOJI['lock']} <b>Игра завершена и скрыта из списка активных.</b>\n"
+        f"{EMOJI['info']} Участники могут ещё месяц видеть информацию об игре.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
@@ -1230,7 +1270,7 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         
-        if game["started"]:
+        if game.get("started", False):
             await update.message.reply_text(
                 f"{EMOJI['cross']} <b>Игра уже началась!</b>\n\n"
                 f"Распределение уже проведено, присоединиться нельзя.",
@@ -1315,7 +1355,9 @@ async def lifespan(app: FastAPI):
     
     print("🎅 Инициализация Тайного Санты...")
     
-    cleanup_finished_games()
+    # Очищаем только старые игры (более 30 дней)
+    cleanup_old_games(days_old=30)
+    
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрация обработчиков
@@ -1347,6 +1389,7 @@ async def lifespan(app: FastAPI):
         print(f"✅ Webhook установлен на {WEBHOOK_URL}")
     
     print(f"✅ Тайный Санта готов! Всего пользователей: {len(storage['users'])}")
+    print(f"🎮 Активных игр: {len([g for g in storage['games'].values() if not g.get('started', False)])}")
     print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
     
     yield
@@ -1378,10 +1421,15 @@ async def webhook(req: Request):
 @app.get("/")
 async def health_check():
     """Health check endpoint"""
+    active_games = len([g for g in storage["games"].values() if not g.get("started", False)])
+    finished_games = len([g for g in storage["games"].values() if g.get("started", False)])
+    
     return {
         "status": "ok", 
         "message": "🎅 Тайный Санта работает",
         "games_count": len(storage["games"]),
+        "active_games": active_games,
+        "finished_games": finished_games,
         "users_count": len(storage["users"]),
         "faq_channel": FAQ_CHANNEL_LINK
     }
@@ -1392,7 +1440,14 @@ def main():
     print(f"🎄 Запуск на порту {PORT}")
     print(f"📊 Всего пользователей: {len(storage['users'])}")
     print(f"🎮 Всего игр: {len(storage['games'])}")
+    
+    active_games = len([g for g in storage["games"].values() if not g.get("started", False)])
+    finished_games = len([g for g in storage["games"].values() if g.get("started", False)])
+    
+    print(f"   Активных: {active_games}")
+    print(f"   Завершенных: {finished_games}")
     print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
+    
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
