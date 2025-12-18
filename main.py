@@ -304,7 +304,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         user["tmp_name"] = update.message.text
         user["state"] = "wait_game_amount"
-        save_storage()
+        save_storage()  # <-- ВАЖНО: сохраняем состояние
 
         await update.message.reply_text(
             f"{EMOJI['money']} *Сумма подарка*\n\n"
@@ -318,27 +318,43 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---- БЮДЖЕТ ИГРЫ ----
     if user["state"] == "wait_game_amount":
         try:
-            amount = float(update.message.text.replace(",", "."))
+            # Убираем пробелы и заменяем запятые на точки
+            text = update.message.text.replace(" ", "").replace(",", ".")
+            amount = float(text)
+            
             if amount <= 0:
                 await update.message.reply_text(
                     f"{EMOJI['cross']} Сумма должна быть положительной! Попробуй снова:"
                 )
                 return
+                
             if amount > 1000000:
                 await update.message.reply_text(
                     f"{EMOJI['cross']} Сумма слишком большая! Максимум 1,000,000 ₽. Попробуй снова:"
                 )
                 return
+                
         except ValueError:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Пожалуйста, введи корректную сумму (например: 1000 или 1000.50):"
             )
             return
 
+        # Проверяем, что у нас есть временное имя
+        if "tmp_name" not in user:
+            await update.message.reply_text(
+                f"{EMOJI['cross']} Что-то пошло не так. Начни создание игры заново."
+            )
+            user["state"] = None
+            save_storage()
+            return
+
         game_id = gen_game_id()
 
         # Форматируем сумму (убираем лишние нули)
         amount_str = f"{amount:g}".rstrip('0').rstrip('.')
+        if amount_str.endswith('.'):
+            amount_str = amount_str[:-1]
 
         storage["games"][game_id] = {
             "id": game_id,
@@ -351,10 +367,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "created_at": update.message.date.isoformat()
         }
 
+        # Очищаем состояние пользователя
         user["state"] = None
-        user.pop("tmp_name", None)
+        if "tmp_name" in user:
+            del user["tmp_name"]
         user["games"].append(game_id)
-        save_storage()
+        save_storage()  # <-- ВАЖНО: сохраняем изменения
 
         game = storage["games"][game_id]
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
