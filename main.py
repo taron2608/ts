@@ -51,16 +51,28 @@ EMOJI = {
     "crown": "👑"
 }
 
+def escape_markdown(text):
+    """Экранирует спецсимволы Markdown"""
+    if not text:
+        return ""
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return ''.join(['\\' + char if char in escape_chars else char for char in text])
+
 def format_user_name(user_info):
     """Форматирование имени пользователя"""
-    if user_info.first_name and user_info.last_name:
-        return f"{user_info.first_name} {user_info.last_name}"
-    elif user_info.first_name:
-        return user_info.first_name
-    elif user_info.username:
-        return f"@{user_info.username}"
-    else:
+    if not user_info:
         return "Анонимный Санта"
+    
+    if user_info.first_name and user_info.last_name:
+        name = f"{user_info.first_name} {user_info.last_name}"
+    elif user_info.first_name:
+        name = user_info.first_name
+    elif user_info.username:
+        name = f"@{user_info.username}"
+    else:
+        name = "Анонимный Санта"
+    
+    return escape_markdown(name)
 
 # ------------------ ХРАНИЛИЩЕ ------------------
 def load_storage():
@@ -84,23 +96,6 @@ def get_user(uid):
         "state": None,
         "games": []
     })
-
-def game_card(game, short=False):
-    """Красивая карточка игры"""
-    status = "🟢 Активна" if not game["started"] else "🟣 Распределено"
-    
-    if short:
-        return f"{EMOJI['tree']} {game['name']}"
-    
-    card = (
-        f"{EMOJI['tree']} *{game['name']}*\n"
-        f"{EMOJI['money']} *Бюджет:* {game['amount']} ₽\n"
-        f"{EMOJI['users']} *Участников:* {len(game['players'])}\n"
-        f"{EMOJI['star']} *Статус:* {status}"
-    )
-    if not game["started"]:
-        card += f"\n{EMOJI['link']} *Приглашение:* `{game['id']}`"
-    return card
 
 # ------------------ ГЛАВНОЕ МЕНЮ ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,9 +136,7 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not user_games:
         await query.edit_message_text(
-            f"{EMOJI['tree']} *У тебя пока нет игр*\n\n"
-            f"Создай новую игру или присоединись к существующей!",
-            parse_mode="Markdown"
+            f"{EMOJI['tree']} У тебя пока нет игр\n\nСоздай новую игру или присоединись к существующей!"
         )
         return
     
@@ -153,13 +146,14 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for game in user_games[:10]:
         is_owner = f"{EMOJI['crown']} " if game["owner"] == user_id else ""
         status = "🟢" if not game["started"] else "🟣"
+        game_name = escape_markdown(game["name"])
         
-        text += f"{status} {is_owner}*{game['name']}*\n"
+        text += f"{status} {is_owner}*{game_name}*\n"
         text += f"   {EMOJI['users']} {len(game['players'])} | {EMOJI['money']} {game['amount']} ₽\n\n"
         
         buttons.append([
             InlineKeyboardButton(
-                f"{status} {game['name'][:15]}...",
+                f"{status} {game_name[:15]}",
                 callback_data=f"game_{game['id']}"
             )
         ])
@@ -187,8 +181,15 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = str(query.from_user.id)
+    game_name = escape_markdown(game["name"])
     
-    text = game_card(game)
+    status = "🟢 Активна" if not game["started"] else "🟣 Распределено"
+    text = (
+        f"{EMOJI['tree']} *{game_name}*\n"
+        f"{EMOJI['money']} *Бюджет:* {game['amount']} ₽\n"
+        f"{EMOJI['users']} *Участников:* {len(game['players'])}\n"
+        f"{EMOJI['star']} *Статус:* {status}"
+    )
     
     keyboard = []
     
@@ -214,18 +215,12 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Кнопки для участника (не владельца)
     elif user_id in game["players"]:
         if game["started"] and user_id in game.get("pairs", {}):
-            receiver_id = game["pairs"][user_id]
-            try:
-                receiver = await context.bot.get_chat(receiver_id)
-                receiver_name = format_user_name(receiver)
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"{EMOJI['gift']} Мой получатель",
-                        callback_data=f"receiver_{game_id}"
-                    )
-                ])
-            except:
-                pass
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{EMOJI['gift']} Мой получатель",
+                    callback_data=f"receiver_{game_id}"
+                )
+            ])
     
     keyboard.append([
         InlineKeyboardButton(f"{EMOJI['back']} К списку игр", callback_data="my_games"),
@@ -251,10 +246,11 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
+    game_name = escape_markdown(game["name"])
     
     text = (
         f"{EMOJI['gift']} *Приглашение в игру*\n\n"
-        f"{EMOJI['tree']} *{game['name']}*\n"
+        f"{EMOJI['tree']} *{game_name}*\n"
         f"{EMOJI['money']} *Сумма подарка:* {game['amount']} ₽\n"
         f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
         f"{EMOJI['link']} *Ссылка для приглашения:*\n"
@@ -293,108 +289,98 @@ async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user = get_user(user_id)
+    
+    print(f"DEBUG: User {user_id} state: {user.get('state')}")
 
     # ---- НАЗВАНИЕ ИГРЫ ----
-    if user["state"] == "wait_game_name":
-        if len(update.message.text) < 2:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Название должно быть не короче 2 символов. Попробуй снова:"
-            )
+    if user.get("state") == "wait_game_name":
+        name = update.message.text.strip()
+        if len(name) < 2:
+            await update.message.reply_text(f"{EMOJI['cross']} Слишком короткое название. Минимум 2 символа:")
             return
             
-        user["tmp_name"] = update.message.text
+        user["tmp_name"] = name
         user["state"] = "wait_game_amount"
-        save_storage()  # <-- ВАЖНО: сохраняем состояние
-
+        save_storage()
+        
         await update.message.reply_text(
-            f"{EMOJI['money']} *Сумма подарка*\n\n"
-            f"Укажи примерную стоимость подарка:\n"
-            f"_Например:_ 1000 или 1500.50\n\n"
-            f"Введи сумму:",
+            f"{EMOJI['money']} *Сумма подарка*\n\nВведи сумму в рублях:",
             parse_mode="Markdown"
         )
         return
 
     # ---- БЮДЖЕТ ИГРЫ ----
-    if user["state"] == "wait_game_amount":
-        try:
-            # Убираем пробелы и заменяем запятые на точки
-            text = update.message.text.replace(" ", "").replace(",", ".")
-            amount = float(text)
-            
-            if amount <= 0:
-                await update.message.reply_text(
-                    f"{EMOJI['cross']} Сумма должна быть положительной! Попробуй снова:"
-                )
-                return
-                
-            if amount > 1000000:
-                await update.message.reply_text(
-                    f"{EMOJI['cross']} Сумма слишком большая! Максимум 1,000,000 ₽. Попробуй снова:"
-                )
-                return
-                
-        except ValueError:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Пожалуйста, введи корректную сумму (например: 1000 или 1000.50):"
-            )
-            return
-
-        # Проверяем, что у нас есть временное имя
+    if user.get("state") == "wait_game_amount":
         if "tmp_name" not in user:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Что-то пошло не так. Начни создание игры заново."
-            )
+            await update.message.reply_text(f"{EMOJI['cross']} Ошибка. Начни заново: /start")
             user["state"] = None
             save_storage()
             return
+            
+        try:
+            # Чистим ввод
+            text = update.message.text.strip().replace(" ", "").replace(",", ".")
+            amount = float(text)
+            
+            if amount <= 0:
+                await update.message.reply_text(f"{EMOJI['cross']} Сумма должна быть больше 0. Попробуй снова:")
+                return
+                
+            if amount > 1000000:
+                await update.message.reply_text(f"{EMOJI['cross']} Максимум 1,000,000 ₽. Попробуй снова:")
+                return
+                
+        except ValueError:
+            await update.message.reply_text(f"{EMOJI['cross']} Это не похоже на число. Пример: 1000 или 1500.50")
+            return
 
+        # Создаем игру
         game_id = gen_game_id()
-
-        # Форматируем сумму (убираем лишние нули)
-        amount_str = f"{amount:g}".rstrip('0').rstrip('.')
-        if amount_str.endswith('.'):
-            amount_str = amount_str[:-1]
-
+        
+        # Форматируем сумму
+        if amount.is_integer():
+            amount_str = str(int(amount))
+        else:
+            amount_str = f"{amount:g}".rstrip('0').rstrip('.')
+        
+        game_name = escape_markdown(user["tmp_name"])
+        
         storage["games"][game_id] = {
             "id": game_id,
-            "name": user["tmp_name"],
+            "name": user["tmp_name"],  # Оригинальное имя
             "amount": amount_str,
             "owner": user_id,
             "players": [user_id],
             "started": False,
-            "pairs": {},
-            "created_at": update.message.date.isoformat()
+            "pairs": {}
         }
 
-        # Очищаем состояние пользователя
+        # Чистим состояние
+        del user["tmp_name"]
         user["state"] = None
-        if "tmp_name" in user:
-            del user["tmp_name"]
-        user["games"].append(game_id)
-        save_storage()  # <-- ВАЖНО: сохраняем изменения
+        user.setdefault("games", []).append(game_id)
+        save_storage()
 
-        game = storage["games"][game_id]
+        # Отправляем результат
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
-
-        # КРАСИВОЕ ПРИГЛАШЕНИЕ
+        
         text = (
-            f"{EMOJI['tree']}✨ *Игра «{game['name']}» готова!* ✨{EMOJI['star']}\n\n"
-            f"{EMOJI['money']} *Сумма подарка:* {game['amount']} ₽\n"
-            f"{EMOJI['users']} *Участников:* {len(game['players'])} (включая тебя)\n\n"
+            f"{EMOJI['tree']}✨ *Игра «{game_name}» готова!*\n\n"
+            f"{EMOJI['money']} *Сумма:* {amount_str} ₽\n"
+            f"{EMOJI['users']} *Участников:* 1 (включая тебя)\n\n"
             f"{EMOJI['link']} *Ссылка для друзей:*\n"
             f"{invite_link}\n\n"
-            f"{EMOJI['snowflake']} Отправь эту волшебную ссылку участникам!\n"
-            f"{EMOJI['santa']} Когда все соберутся — жми «{EMOJI['play']} Запустить распределение»!"
+            f"{EMOJI['snowflake']} Отправь ссылку друзьям!\n"
+            f"{EMOJI['santa']} Когда все соберутся — запусти распределение!"
         )
-
+        
         keyboard = [
             [
                 InlineKeyboardButton(f"{EMOJI['link']} Пригласить", callback_data=f"invite_{game_id}"),
                 InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
             ],
             [InlineKeyboardButton(f"{EMOJI['play']} Запустить распределение", callback_data=f"start_game_{game_id}")],
-            [InlineKeyboardButton(f"{EMOJI['list']} К списку игр", callback_data="my_games")]
+            [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")]
         ]
 
         await update.message.reply_text(
@@ -403,43 +389,43 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-
-    # ---- ПРИСОЕДИНЕНИЕ ПО КОДУ (резервный вариант) ----
-    if user["state"] == "wait_join_code":
-        game = storage["games"].get(update.message.text)
+        
+    # ---- ПРИСОЕДИНЕНИЕ ПО КОДУ ----
+    if user.get("state") == "wait_join_code":
+        game_id = update.message.text.strip()
+        game = storage["games"].get(game_id)
+        
         if not game:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Игра не найдена! Проверь код и попробуй снова."
-            )
+            await update.message.reply_text(f"{EMOJI['cross']} Игра не найдена! Проверь код.")
             return
 
         if game["started"]:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Игра уже началась, присоединиться нельзя."
-            )
+            await update.message.reply_text(f"{EMOJI['cross']} Игра уже началась, присоединиться нельзя.")
             return
 
         if user_id in game["players"]:
-            await update.message.reply_text(
-                f"{EMOJI['info']} Ты уже в этой игре!"
-            )
+            await update.message.reply_text(f"{EMOJI['info']} Ты уже в этой игре!")
             return
 
         game["players"].append(user_id)
         user["state"] = None
-        user["games"].append(game["id"])
+        user.setdefault("games", []).append(game_id)
         save_storage()
-
+        
+        game_name = escape_markdown(game["name"])
+        
         await update.message.reply_text(
             f"{EMOJI['check']} *Ты присоединился!*\n\n"
-            f"{game_card(game)}\n\n"
+            f"{EMOJI['tree']} *{game_name}*\n"
+            f"{EMOJI['money']} *Сумма:* {game['amount']} ₽\n"
+            f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
             f"{EMOJI['santa']} Ждем начала распределения!",
             parse_mode="Markdown"
         )
         return
-
+        
     # ---- ИЗМЕНЕНИЕ СУММЫ ----
-    if user["state"] and user["state"].startswith("wait_new_amount_"):
+    if user.get("state") and user["state"].startswith("wait_new_amount_"):
         game_id = user["state"].split("_")[-1]
         
         if game_id not in storage["games"]:
@@ -457,27 +443,34 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            amount = float(update.message.text.replace(",", "."))
+            text = update.message.text.strip().replace(" ", "").replace(",", ".")
+            amount = float(text)
+            
             if amount <= 0:
-                await update.message.reply_text(
-                    f"{EMOJI['cross']} Сумма должна быть положительной! Попробуй снова:"
-                )
+                await update.message.reply_text(f"{EMOJI['cross']} Сумма должна быть больше 0. Попробуй снова:")
                 return
+                
         except ValueError:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} Пожалуйста, введи корректную сумму (например: 1000 или 1000.50):"
-            )
+            await update.message.reply_text(f"{EMOJI['cross']} Это не похоже на число. Пример: 1000 или 1500.50")
             return
 
         # Форматируем сумму
-        amount_str = f"{amount:g}".rstrip('0').rstrip('.')
+        if amount.is_integer():
+            amount_str = str(int(amount))
+        else:
+            amount_str = f"{amount:g}".rstrip('0').rstrip('.')
+            
         game["amount"] = amount_str
         user["state"] = None
         save_storage()
+        
+        game_name = escape_markdown(game["name"])
 
         await update.message.reply_text(
             f"{EMOJI['check']} *Сумма обновлена!*\n\n"
-            f"{game_card(game)}",
+            f"{EMOJI['tree']} *{game_name}*\n"
+            f"{EMOJI['money']} *Бюджет:* {game['amount']} ₽\n"
+            f"{EMOJI['users']} *Участников:* {len(game['players'])}",
             parse_mode="Markdown"
         )
         return
@@ -530,8 +523,9 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         except:
             players_text += f"{i}. Игрок {i}\n"
-
-    text = f"{game_card(game, short=True)}\n\n{players_text}"
+    
+    game_name = escape_markdown(game["name"])
+    text = f"{EMOJI['tree']} *{game_name}*\n\n{players_text}"
 
     # Кнопка назад
     buttons.append([
@@ -564,9 +558,8 @@ async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     uid,
                     f"{EMOJI['cross']} *Тебя удалили из игры*\n\n"
-                    f"{EMOJI['tree']} Игра: {game['name']}\n"
-                    f"{EMOJI['info']} Создатель игры принял решение об твоем удалении.",
-                    parse_mode="Markdown"
+                    f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
+                    f"{EMOJI['info']} Создатель игры принял решение об твоем удалении."
                 )
             except:
                 pass
@@ -625,11 +618,10 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{EMOJI['gift']} *Твой Тайный Санта!*\n\n"
                 f"{EMOJI['star']} *Твой получатель:* {receiver_name}\n"
                 f"{EMOJI['money']} *Сумма подарка:* {game['amount']} ₽\n"
-                f"{EMOJI['tree']} *Игра:* {game['name']}\n\n"
+                f"{EMOJI['tree']} *Игра:* {escape_markdown(game['name'])}\n\n"
                 f"{EMOJI['santa']} *Совет Санты:*\n"
                 f"Узнай интересы получателя и прояви креативность!\n\n"
-                f"Счастливого Рождества! 🎄",
-                parse_mode="Markdown"
+                f"Счастливого Рождества! 🎄"
             )
             success_count += 1
         except Exception as e:
@@ -638,10 +630,9 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{EMOJI['check']} *Распределение проведено!*\n\n"
         f"Участникам отправлены сообщения с их получателями.\n\n"
-        f"{EMOJI['tree']} *Игра:* {game['name']}\n"
+        f"{EMOJI['tree']} *Игра:* {escape_markdown(game['name'])}\n"
         f"{EMOJI['users']} *Участников:* {len(game['players'])}\n"
-        f"{EMOJI['money']} *Сумма:* {game['amount']} ₽",
-        parse_mode="Markdown"
+        f"{EMOJI['money']} *Сумма:* {game['amount']} ₽"
     )
 
 # ------------------ УДАЛЕНИЕ ИГРЫ ------------------
@@ -663,8 +654,7 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     uid,
                     f"{EMOJI['info']} *Игра удалена*\n\n"
-                    f"{EMOJI['tree']} Игра '{game['name']}' была удалена создателем.",
-                    parse_mode="Markdown"
+                    f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' была удалена создателем."
                 )
             except:
                 pass
@@ -674,8 +664,7 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"{EMOJI['check']} *Игра удалена*\n\n"
-        f"Игра '{game['name']}' успешно удалена.",
-        parse_mode="Markdown"
+        f"Игра '{escape_markdown(game['name'])}' успешно удалена."
     )
 
 # ------------------ ИЗМЕНЕНИЕ СУММЫ ------------------
@@ -696,10 +685,9 @@ async def edit_amount_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         f"{EMOJI['edit']} *Изменение суммы*\n\n"
-        f"{EMOJI['tree']} Игра: {game['name']}\n"
+        f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
         f"{EMOJI['money']} Текущая сумма: {game['amount']} ₽\n\n"
-        f"Введи новую сумму:",
-        parse_mode="Markdown"
+        f"Введи новую сумму:"
     )
 
 # ------------------ ГЛАВНОЕ МЕНЮ (колбэк) ------------------
@@ -758,7 +746,9 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         if user_id in game["players"]:
             await update.message.reply_text(
                 f"{EMOJI['info']} *Ты уже в игре!*\n\n"
-                f"{game_card(game)}\n\n"
+                f"{EMOJI['tree']} *{escape_markdown(game['name'])}*\n"
+                f"{EMOJI['money']} *Сумма:* {game['amount']} ₽\n"
+                f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
                 f"Ждем начала распределения!",
                 parse_mode="Markdown"
             )
@@ -767,7 +757,7 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         # Добавляем в игру
         game["players"].append(user_id)
         user = get_user(user_id)
-        user["games"].append(game_id)
+        user.setdefault("games", []).append(game_id)
         save_storage()
         
         # Уведомляем создателя
@@ -775,16 +765,17 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.send_message(
                 game["owner"],
                 f"{EMOJI['bell']} *Новый участник!*\n\n"
-                f"К игре '{game['name']}' присоединился новый участник.\n"
-                f"{EMOJI['users']} Теперь участников: {len(game['players'])}",
-                parse_mode="Markdown"
+                f"К игре '{escape_markdown(game['name'])}' присоединился новый участник.\n"
+                f"{EMOJI['users']} Теперь участников: {len(game['players'])}"
             )
         except:
             pass
         
         await update.message.reply_text(
             f"{EMOJI['check']} *Ты присоединился к игре!*\n\n"
-            f"{game_card(game)}\n\n"
+            f"{EMOJI['tree']} *{escape_markdown(game['name'])}*\n"
+            f"{EMOJI['money']} *Сумма:* {game['amount']} ₽\n"
+            f"{EMOJI['users']} *Участников:* {len(game['players'])}\n\n"
             f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
             parse_mode="Markdown"
         )
