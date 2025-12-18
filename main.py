@@ -56,7 +56,8 @@ EMOJI = {
     "wish": "🎯",
     "not_wish": "🙅",
     "preferences": "📝",
-    "help": "❓"
+    "help": "❓",
+    "skip": "⏭️"
 }
 
 def escape_markdown(text):
@@ -107,7 +108,8 @@ def get_user(uid):
             "state": None,
             "games": [],
             "wishes": {},
-            "preferences": {}
+            "preferences": {},
+            "notified_games": []  # Игры, где уже было предложено указать пожелания
         }
     return storage["users"][uid_str]
 
@@ -477,7 +479,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "players": [user_id],
             "started": False,
             "pairs": {},
-            "created_time": time.time()
+            "created_time": time.time(),
+            "last_modified": time.time()
         }
 
         del user["tmp_name"]
@@ -487,10 +490,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
         
+        # ИСПРАВЛЕННЫЙ ТЕКСТ: убрали "(включая тебя)"
         text = (
             f"{EMOJI['tree']}✨ <b>Игра «{game_name}» готова!</b>\n\n"
             f"{EMOJI['money']} <b>Сумма:</b> {amount_str} ₽\n"
-            f"{EMOJI['users']} <b>Участников:</b> 1 (включая тебя)\n\n"
+            f"{EMOJI['users']} <b>Участников:</b> 1\n\n"
             f"{EMOJI['link']} <b>Ссылка для друзей:</b>\n"
             f"{invite_link}\n\n"
             f"{EMOJI['snowflake']} Отправь ссылку друзьям!\n"
@@ -513,6 +517,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML"
         )
+        
+        # Предлагаем организатору указать пожелания (мягко)
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"{EMOJI['info']} <b>Необязательно, но полезно</b>\n\n"
+                f"Хочешь помочь своему Санте? Укажи пожелания для подарка!\n\n"
+                f"📝 <b>Что это даст:</b>\n"
+                f"• Санта будет знать, что тебе нравится\n"
+                f"• Получишь более подходящий подарок\n"
+                f"• Процесс будет интереснее для всех\n\n"
+                f"Можешь указать сейчас или позже в разделе игры.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}"),
+                        InlineKeyboardButton(f"{EMOJI['skip']} Пропустить", callback_data=f"skip_wish_suggestion_{game_id}")
+                    ]
+                ])
+            )
+        except Exception as e:
+            print(f"Ошибка отправки предложения организатору: {e}")
+            
         return
         
     # ---- ПРИСОЕДИНЕНИЕ ПО КОДУ ----
@@ -586,8 +613,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount_str = str(int(amount))
         else:
             amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
-            
+        
+        old_amount = game["amount"]
         game["amount"] = amount_str
+        game["last_modified"] = time.time()
         user["state"] = None
         save_storage()
         
@@ -596,7 +625,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Сумма обновлена!</b>\n\n"
             f"{EMOJI['tree']} <b>{game_name}</b>\n"
-            f"{EMOJI['money']} <b>Бюджет:</b> {game['amount']} ₽\n"
+            f"{EMOJI['money']} <b>Бюджет:</b> {old_amount} → {game['amount']} ₽\n"
             f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -604,6 +633,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
             ])
         )
+        
+        # Уведомляем участников об изменении суммы
+        for uid in game["players"]:
+            if uid != user_id:  # Не уведомляем организатора (он уже знает)
+                try:
+                    await context.bot.send_message(
+                        uid,
+                        f"{EMOJI['bell']} <b>Изменение бюджета игры</b>\n\n"
+                        f"{EMOJI['tree']} Игра: <b>{game_name}</b>\n"
+                        f"{EMOJI['money']} <b>Новый бюджет:</b> {game['amount']} ₽ (было: {old_amount} ₽)\n\n"
+                        f"{EMOJI['info']} Организатор изменил сумму подарка.",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+        
         return
     
     # ---- ПОЖЕЛАНИЯ: ХОЧУ ----
@@ -730,14 +775,15 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
     game_name = escape_markdown(game["name"])
     
+    # ИСПРАВЛЕННЫЙ ТЕКСТ для приглашения
     text = (
         f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
         f"{EMOJI['tree']} <b>{game_name}</b>\n"
         f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
         f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
-        f"{EMOJI['link']} <b>Ссылка для приглашения:</b>\n"
+        f"{EMOJI['link']} <b>Ссылка для присоединения:</b>\n"
         f"{invite_link}\n\n"
-        f"{EMOJI['snowflake']} Просто отправь эту ссылку друзьям!"
+        f"{EMOJI['snowflake']} Нажми на ссылку, чтобы присоединиться к игре!"
     )
     
     keyboard = [
@@ -1017,6 +1063,31 @@ async def skip_not_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+async def skip_wish_suggestion_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопки 'Пропустить' для предложения указать пожелания"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[3]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
+    
+    user_id = str(query.from_user.id)
+    user = get_user(user_id)
+    
+    # Добавляем игру в список, где уже предлагали пожелания
+    user.setdefault("notified_games", []).append(game_id)
+    save_storage()
+    
+    await query.edit_message_text(
+        f"{EMOJI['check']} <b>Хорошо!</b>\n\n"
+        f"Ты можешь указать пожелания позже в разделе игры.",
+        parse_mode="HTML"
+    )
+
 # ------------------ ЗАПУСК РАСПРЕДЕЛЕНИЯ ------------------
 async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1052,7 +1123,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     game["pairs"] = pairs
     game["started"] = True
-    game["finished_time"] = time.time()  # Добавляем время завершения
+    game["finished_time"] = time.time()
     save_storage()
 
     success_count = 0
@@ -1096,8 +1167,11 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Ошибка отправки сообщения {giver}: {e}")
 
+    # ИСПРАВЛЕНИЕ: Отправляем организатору список пар в СПОЙЛЕРЕ
     try:
-        pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя):</b>\n\n"
+        pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя)</b>\n\n"
+        pairs_list += "<spoiler>🔒 Нажми, чтобы увидеть список пар:\n\n"
+        
         for giver, receiver in pairs.items():
             try:
                 giver_info = await context.bot.get_chat(giver)
@@ -1108,6 +1182,9 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pairs_list += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
         
+        pairs_list += "</spoiler>\n\n"
+        pairs_list += f"{EMOJI['lock']} <i>Этот список видишь только ты. Не показывай его другим участникам!</i>"
+        
         await context.bot.send_message(
             game["owner"],
             pairs_list,
@@ -1117,6 +1194,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Ошибка отправки списка пар организатору: {e}")
 
+    # ИСПРАВЛЕННЫЙ ТЕКСТ напоминания о пожеланиях
     for uid in game["players"]:
         user = get_user(uid)
         if "wishes" not in user or game_id not in user["wishes"] or not user["wishes"][game_id].get("wish"):
@@ -1128,9 +1206,9 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{EMOJI['santa']} Ты не указал(а) свои пожелания для подарка.\n"
                     f"Твой Санта не будет знать, что тебе подарить.\n\n"
                     f"{EMOJI['wish']} <b>Что можно сделать:</b>\n"
-                    f"• Напиши своему Санте в личные сообщения\n"
-                    f"• Расскажи о своих интересах\n"
-                    f"• Предложи идеи для подарка\n\n"
+                    f"• Расскажи организатору о своих интересах\n"
+                    f"• Подготовь список идей для подарка\n"
+                    f"• Будь готов(а) к любому сюрпризу!\n\n"
                     f"Удачного обмена подарками! 🎁",
                     parse_mode="HTML"
                 )
@@ -1140,7 +1218,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"{EMOJI['check']} <b>Распределение проведено!</b>\n\n"
         f"Участникам отправлены сообщения с их получателями.\n"
-        f"Тебе отправлен полный список пар.\n\n"
+        f"Тебе отправлен скрытый список пар (открой спойлер).\n\n"
         f"{EMOJI['lock']} <b>Игра завершена и скрыта из списка активных.</b>\n"
         f"{EMOJI['info']} Участники могут ещё месяц видеть информацию об игре.",
         parse_mode="HTML",
@@ -1325,22 +1403,32 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             ])
         )
         
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"{EMOJI['info']} <b>🎯 Укажи свои пожелания для подарка!</b>\n\n"
-                f"Чтобы твой Тайный Санта знал, что тебе дарить:\n\n"
-                f"✅ <b>Что бы ты хотел(а) получить</b>\n"
-                f"❌ <b>Что бы ты НЕ хотел(а) получать</b>\n\n"
-                f"<i>Эти пожелания увидит только твой Тайный Санта.</i>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
-                    [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")]
-                ])
-            )
-        except Exception as e:
-            print(f"Ошибка отправки информационного сообщения: {e}")
+        # Мягкое предложение указать пожелания (только если еще не предлагали для этой игры)
+        user = get_user(user_id)
+        if game_id not in user.get("notified_games", []):
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"{EMOJI['info']} <b>Необязательно, но полезно</b>\n\n"
+                    f"Хочешь помочь своему Санте? Укажи пожелания для подарка!\n\n"
+                    f"📝 <b>Что это даст:</b>\n"
+                    f"• Санта будет знать, что тебе нравится\n"
+                    f"• Получишь более подходящий подарок\n"
+                    f"• Процесс будет интереснее для всех\n\n"
+                    f"Можешь указать сейчас или позже в разделе игры.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}"),
+                            InlineKeyboardButton(f"{EMOJI['skip']} Пропустить", callback_data=f"skip_wish_suggestion_{game_id}")
+                        ]
+                    ])
+                )
+                # Добавляем игру в список, где уже предлагали
+                user.setdefault("notified_games", []).append(game_id)
+                save_storage()
+            except Exception as e:
+                print(f"Ошибка отправки предложения участнику: {e}")
             
     else:
         await start(update, context)
@@ -1380,6 +1468,7 @@ async def lifespan(app: FastAPI):
     application.add_handler(CallbackQueryHandler(edit_wish_cb, pattern="edit_wish_"))
     application.add_handler(CallbackQueryHandler(delete_wish_cb, pattern="delete_wish_"))
     application.add_handler(CallbackQueryHandler(skip_not_wish_cb, pattern="skip_not_wish_"))
+    application.add_handler(CallbackQueryHandler(skip_wish_suggestion_cb, pattern="skip_wish_suggestion_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
     await application.initialize()
