@@ -234,6 +234,4 @@ def main():
     uvicorn.run(app, host="0.0.0.0", port=PORT, lifespan="on")
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(on_startup())
-    main()
+    app.run_polling(drop_pending_updates=True)
