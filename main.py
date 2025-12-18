@@ -783,34 +783,62 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Ошибка отправки сообщения {giver}: {e}")
 
-    # Отправляем организатору полный список пар
+    # Отправляем организатору полный список пар под спойлером
     try:
         pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя):</b>\n\n"
+        
+        # Формируем спойлер с парами
+        spoiler_content = ""
         for giver, receiver in pairs.items():
             try:
                 giver_info = await context.bot.get_chat(giver)
                 receiver_info = await context.bot.get_chat(receiver)
-                giver_mention = get_user_html_mention(giver, giver_info)
-                receiver_mention = get_user_html_mention(receiver, receiver_info)
+                giver_name = escape_markdown(giver_info.first_name or giver_info.username or f"Игрок {giver[:4]}")
+                receiver_name = escape_markdown(receiver_info.first_name or receiver_info.username or f"Игрок {receiver[:4]}")
                 
-                pairs_list += f"• {giver_mention} → {receiver_mention}\n"
+                spoiler_content += f"• {giver_name} → {receiver_name}\n"
             except:
-                pairs_list += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
+                spoiler_content += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
+        
+        # Добавляем спойлер (используем тег <tg-spoiler>)
+        pairs_list += f"<tg-spoiler>{spoiler_content}</tg-spoiler>\n\n"
+        pairs_list += f"{EMOJI['lock']} <i>Нажми, чтобы увидеть список</i>"
         
         await context.bot.send_message(
             game["owner"],
             pairs_list,
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            parse_mode="HTML"
         )
     except Exception as e:
         print(f"Ошибка отправки списка пар организатору: {e}")
+        # Альтернатива без спойлера, если не поддерживается
+        try:
+            pairs_list_simple = f"{EMOJI['mail']} <b>Полный список пар (только для тебя):</b>\n\n"
+            for giver, receiver in pairs.items():
+                try:
+                    giver_info = await context.bot.get_chat(giver)
+                    receiver_info = await context.bot.get_chat(receiver)
+                    giver_mention = get_user_html_mention(giver, giver_info)
+                    receiver_mention = get_user_html_mention(receiver, receiver_info)
+                    
+                    pairs_list_simple += f"• {giver_mention} → {receiver_mention}\n"
+                except:
+                    pairs_list_simple += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
+            
+            await context.bot.send_message(
+                game["owner"],
+                pairs_list_simple,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e2:
+            print(f"Ошибка отправки альтернативного списка: {e2}")
 
     # Удаляем игру из общего списка
     await query.edit_message_text(
         f"{EMOJI['check']} <b>Распределение проведено!</b>\n\n"
         f"Участникам отправлены сообщения с их получателями.\n"
-        f"Тебе отправлен полный список пар.\n\n"
+        f"Тебе отправлен полный список пар под спойлером.\n\n"
         f"{EMOJI['lock']} <b>Игра завершена и удалена из списка активных.</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
