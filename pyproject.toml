@@ -1,7 +1,7 @@
 [project]
-name = "secret-santa-bot"
+name = "ts"
 version = "0.1.0"
-description = "Telegram Secret Santa bot with webhook and persistent storage"
+description = "Telegram Secret Santa bot"
 requires-python = ">=3.11"
 
 dependencies = [
@@ -9,3 +9,6 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27"
 ]
+
+[tool.uv]
+package = false
