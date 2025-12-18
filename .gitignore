@@ -1,27 +1,21 @@
-storage.json
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-.env
-.venv
-env/
 venv/
-ENV/
-.pythonlibs/
+env/
+
+# Данные бота (не коммитить!)
+storage.json
+
+# Render
+*.log
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
