@@ -1,7 +1,7 @@
 import json
+import os
 import uuid
 import random
-import os
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -9,14 +9,19 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
 )
+from fastapi import FastAPI, Request
+import uvicorn
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://xxx.onrender.com/webhook
+PORT = int(os.environ.get("PORT", 10000))
+
 STORAGE_FILE = "storage.json"
 
 # ---------------- STORAGE ----------------
@@ -35,106 +40,126 @@ storage = load_storage()
 
 # ---------------- UTILS ----------------
 
-def gen_code():
+def gen_game_id():
     return str(uuid.uuid4())[:8]
+
+def get_user(uid):
+    return storage["users"].setdefault(str(uid), {"state": None})
 
 def game_card(game):
     return (
-        f"🎄 <b>{game['name']}</b>\n"
-        f"💰 Сумма: {game['amount']} ₽\n"
+        f"🎄 Тайный Санта\n\n"
+        f"🎁 Игра: {game['name']}\n"
+        f"💰 Сумма: {game['amount']}\n"
         f"👥 Игроков: {len(game['players'])}"
     )
 
 # ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🎁 Организатор", callback_data="role_org")],
-        [InlineKeyboardButton("👤 Участник", callback_data="role_user")],
-    ]
-    await update.message.reply_text(
-        "Выбери роль:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-# ---------------- ROLE ----------------
-
-async def role_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = str(query.from_user.id)
-
-    storage["users"][user_id] = {"state": query.data}
+    user = get_user(update.effective_user.id)
+    user["state"] = None
     save_storage()
 
-    if query.data == "role_org":
-        await organizer_menu(query)
-    else:
-        await join_game_prompt(query)
-
-# ---------------- ORGANIZER MENU ----------------
-
-async def organizer_menu(query):
     keyboard = [
-        [InlineKeyboardButton("🎮 Создать игру", callback_data="create_game")],
-        [InlineKeyboardButton("📋 Мои игры", callback_data="my_games")],
-        [InlineKeyboardButton("💰 Изменить сумму", callback_data="edit_amount")],
+        [InlineKeyboardButton("🎁 Создать игру", callback_data="create_game")],
+        [InlineKeyboardButton("🔗 Войти в игру", callback_data="join_game")],
     ]
-    await query.edit_message_text(
-        "Панель организатора:",
+
+    await update.message.reply_text(
+        "🎄 Тайный Санта\n\nВыбери действие:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 # ---------------- CREATE GAME ----------------
 
-async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
 
-    context.user_data["creating"] = True
-    await query.edit_message_text("Введите название игры:")
-
-async def game_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("creating"):
-        return
-
-    context.user_data["game_name"] = update.message.text
-    await update.message.reply_text("Введите сумму подарка:")
-
-async def game_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "game_name" not in context.user_data:
-        return
-
-    user_id = str(update.message.from_user.id)
-    game_id = gen_code()
-
-    storage["games"][game_id] = {
-        "id": game_id,
-        "name": context.user_data["game_name"],
-        "amount": update.message.text,
-        "owner": user_id,
-        "players": [user_id],
-        "started": False,
-    }
-
-    context.user_data.clear()
+    user = get_user(query.from_user.id)
+    user["state"] = "wait_game_name"
     save_storage()
 
-    await update.message.reply_text(
-        game_card(storage["games"][game_id]),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("👥 Участники", callback_data=f"players_{game_id}")],
-                [InlineKeyboardButton("🗑 Удалить игру", callback_data=f"delete_{game_id}")],
-            ]
-        ),
-    )
+    await query.edit_message_text("Введите название игры:")
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    user = get_user(user_id)
+
+    # ---- GAME NAME ----
+    if user["state"] == "wait_game_name":
+        user["tmp_name"] = update.message.text
+        user["state"] = "wait_game_amount"
+        save_storage()
+
+        await update.message.reply_text("Введите сумму подарка:")
+        return
+
+    # ---- GAME AMOUNT ----
+    if user["state"] == "wait_game_amount":
+        game_id = gen_game_id()
+
+        storage["games"][game_id] = {
+            "id": game_id,
+            "name": user["tmp_name"],
+            "amount": update.message.text,
+            "owner": user_id,
+            "players": [user_id],
+            "started": False,
+        }
+
+        user["state"] = None
+        user.pop("tmp_name", None)
+        save_storage()
+
+        game = storage["games"][game_id]
+
+        keyboard = [
+            [InlineKeyboardButton("👥 Посмотреть участников", callback_data=f"players_{game_id}")],
+            [InlineKeyboardButton("💰 Изменить сумму", callback_data=f"edit_amount_{game_id}")],
+            [InlineKeyboardButton("🗑 Удалить игру", callback_data=f"delete_{game_id}")],
+        ]
+
+        await update.message.reply_text(
+            game_card(game),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # ---- JOIN GAME ----
+    if user["state"] == "wait_join_code":
+        game = storage["games"].get(update.message.text)
+        if not game:
+            await update.message.reply_text("Игра не найдена.")
+            return
+
+        if user_id in game["players"]:
+            await update.message.reply_text("Ты уже в игре.")
+            return
+
+        game["players"].append(user_id)
+        user["state"] = None
+        save_storage()
+
+        await update.message.reply_text("Ты успешно присоединился к игре!")
+        return
+
+# ---------------- JOIN ----------------
+
+async def join_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = get_user(query.from_user.id)
+    user["state"] = "wait_join_code"
+    save_storage()
+
+    await query.edit_message_text("Введите код игры:")
 
 # ---------------- PLAYERS ----------------
 
-async def players_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -144,18 +169,17 @@ async def players_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for uid in game["players"]:
         buttons.append(
-            [InlineKeyboardButton(f"❌ {uid}", callback_data=f"kick_{game_id}_{uid}")]
+            [InlineKeyboardButton(f"❌ Удалить {uid}", callback_data=f"kick_{game_id}_{uid}")]
         )
 
-    buttons.append([InlineKeyboardButton("⬅ Назад", callback_data="my_games")])
+    buttons.append([InlineKeyboardButton("⬅ Назад", callback_data=f"back_{game_id}")])
 
     await query.edit_message_text(
         game_card(game),
-        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
-async def kick_player(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -166,11 +190,11 @@ async def kick_player(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["players"].remove(uid)
         save_storage()
 
-    await players_menu(update, context)
+    await players_cb(update, context)
 
-# ---------------- DELETE GAME ----------------
+# ---------------- DELETE ----------------
 
-async def delete_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -178,50 +202,38 @@ async def delete_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage["games"].pop(game_id, None)
     save_storage()
 
-    await organizer_menu(query)
+    await query.edit_message_text("Игра удалена.")
 
-# ---------------- JOIN GAME ----------------
+# ---------------- WEBHOOK ----------------
 
-async def join_game_prompt(query):
-    await query.edit_message_text("Отправь код игры:")
+app = FastAPI()
+application = Application.builder().token(BOT_TOKEN).build()
 
-async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text
-    user_id = str(update.message.from_user.id)
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
 
-    game = storage["games"].get(code)
-    if not game:
-        await update.message.reply_text("Игра не найдена")
-        return
+async def on_startup():
+    await application.initialize()
+    await application.bot.set_webhook(WEBHOOK_URL)
 
-    if user_id in game["players"]:
-        await update.message.reply_text("Ты уже в игре")
-        return
-
-    game["players"].append(user_id)
-    save_storage()
-
-    await update.message.reply_text(
-        f"Ты присоединился!\n\n{game_card(game)}",
-        parse_mode="HTML",
-    )
-
-# ---------------- ROUTER ----------------
+# ---------------- MAIN ----------------
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(create_game_cb, pattern="create_game"))
+    application.add_handler(CallbackQueryHandler(join_game_cb, pattern="join_game"))
+    application.add_handler(CallbackQueryHandler(players_cb, pattern="players_"))
+    application.add_handler(CallbackQueryHandler(kick_cb, pattern="kick_"))
+    application.add_handler(CallbackQueryHandler(delete_cb, pattern="delete_"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(role_handler, pattern="role_"))
-    app.add_handler(CallbackQueryHandler(create_game, pattern="create_game"))
-    app.add_handler(CallbackQueryHandler(players_menu, pattern="players_"))
-    app.add_handler(CallbackQueryHandler(kick_player, pattern="kick_"))
-    app.add_handler(CallbackQueryHandler(delete_game, pattern="delete_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_name))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_amount))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, join_game))
-
-    app.run_polling()
+    uvicorn.run(app, host="0.0.0.0", port=PORT, lifespan="on")
 
 if __name__ == "__main__":
+    import asyncio
+    asyncio.run(on_startup())
     main()
