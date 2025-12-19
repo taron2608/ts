@@ -60,6 +60,89 @@ EMOJI = {
     "skip": "⏭️"
 }
 
+# ------------------ СИНГЛТОН ХРАНИЛИЩА ------------------
+class Storage:
+    _instance = None
+    _data = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.load()
+        return cls._instance
+    
+    def load(self):
+        """Загружает данные из файла"""
+        if not os.path.exists(STORAGE_FILE):
+            self._data = {"games": {}, "users": {}}
+        else:
+            try:
+                with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+                    self._data = json.load(f)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"Ошибка загрузки storage.json: {e}")
+                self._data = {"games": {}, "users": {}}
+        
+        # Убедимся, что структура данных правильная
+        if "games" not in self._data:
+            self._data["games"] = {}
+        if "users" not in self._data:
+            self._data["users"] = {}
+        
+        # Очистка старых игр при загрузке
+        self.cleanup_old_games(days_old=30)
+        
+        print(f"✅ Данные загружены: {len(self._data['games'])} игр, {len(self._data['users'])} пользователей")
+    
+    def save(self):
+        """Сохраняет данные в файл"""
+        try:
+            # Создаем временный файл для безопасной записи
+            temp_file = STORAGE_FILE + ".tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            
+            # Заменяем оригинальный файл
+            os.replace(temp_file, STORAGE_FILE)
+        except Exception as e:
+            print(f"❌ Ошибка сохранения storage.json: {e}")
+    
+    def get_data(self):
+        """Возвращает копию данных (для чтения)"""
+        return self._data
+    
+    def update_data(self, updater_func):
+        """Безопасно обновляет данные с автоматическим сохранением"""
+        updater_func(self._data)
+        self.save()
+    
+    def cleanup_old_games(self, days_old=30):
+        """Очищает игры, завершенные более N дней назад"""
+        current_time = time.time()
+        games_to_remove = []
+        
+        for game_id, game in self._data["games"].items():
+            if game.get("started") and game.get("finished_time"):
+                if current_time - game["finished_time"] > (days_old * 24 * 60 * 60):
+                    games_to_remove.append(game_id)
+        
+        for game_id in games_to_remove:
+            for uid, user_data in self._data["users"].items():
+                if "games" in user_data and game_id in user_data["games"]:
+                    user_data["games"].remove(game_id)
+                if "wishes" in user_data and game_id in user_data["wishes"]:
+                    del user_data["wishes"][game_id]
+                if "preferences" in user_data and game_id in user_data["preferences"]:
+                    del user_data["preferences"][game_id]
+            
+            del self._data["games"][game_id]
+        
+        if games_to_remove:
+            print(f"🗑️ Удалено старых игр (>{days_old} дней): {len(games_to_remove)}")
+
+# Глобальный экземпляр хранилища
+storage = Storage()
+
 def escape_markdown(text):
     """Экранирует спецсимволы Markdown"""
     if not text:
@@ -84,66 +167,63 @@ def get_user_html_mention(user_id, user_info):
     
     return f'<a href="tg://user?id={user_id}">{name}</a>'
 
-# ------------------ ХРАНИЛИЩЕ ------------------
-def load_storage():
-    if not os.path.exists(STORAGE_FILE):
-        return {"games": {}, "users": {}}
-    with open(STORAGE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_storage():
-    with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(storage, f, ensure_ascii=False, indent=2)
-
-storage = load_storage()
-
 # ------------------ УТИЛИТЫ ------------------
 def gen_game_id():
     return str(uuid.uuid4())[:8]
 
-def get_user(uid):
+def get_user_data(uid):
+    """Получает данные пользователя из хранилища"""
+    data = storage.get_data()
     uid_str = str(uid)
-    if uid_str not in storage["users"]:
-        storage["users"][uid_str] = {
+    if uid_str not in data["users"]:
+        # Не сохраняем здесь - это только для чтения
+        return {
             "state": None,
             "games": [],
             "wishes": {},
             "preferences": {},
-            "notified_games": []  # Игры, где уже было предложено указать пожелания
+            "notified_games": []
         }
-    return storage["users"][uid_str]
+    return data["users"][uid_str]
 
-def cleanup_old_games(days_old=30):
-    """Очищает игры, завершенные более N дней назад (автоматически при старте)"""
-    current_time = time.time()
-    games_to_remove = []
+def update_user(uid, updater_func):
+    """Безопасно обновляет данные пользователя"""
+    def update_storage(data):
+        uid_str = str(uid)
+        if uid_str not in data["users"]:
+            data["users"][uid_str] = {
+                "state": None,
+                "games": [],
+                "wishes": {},
+                "preferences": {},
+                "notified_games": []
+            }
+        updater_func(data["users"][uid_str])
     
-    for game_id, game in storage["games"].items():
-        if game.get("started") and game.get("finished_time"):
-            if current_time - game["finished_time"] > (days_old * 24 * 60 * 60):
-                games_to_remove.append(game_id)
+    storage.update_data(update_storage)
+
+def get_game_data(game_id):
+    """Получает данные игры из хранилища"""
+    data = storage.get_data()
+    return data["games"].get(game_id)
+
+def update_game(game_id, updater_func):
+    """Безопасно обновляет данные игры"""
+    def update_storage(data):
+        if game_id in data["games"]:
+            updater_func(data["games"][game_id])
     
-    for game_id in games_to_remove:
-        for uid, user_data in storage["users"].items():
-            if "games" in user_data and game_id in user_data["games"]:
-                user_data["games"].remove(game_id)
-            if "wishes" in user_data and game_id in user_data["wishes"]:
-                del user_data["wishes"][game_id]
-            if "preferences" in user_data and game_id in user_data["preferences"]:
-                del user_data["preferences"][game_id]
-        
-        del storage["games"][game_id]
-    
-    if games_to_remove:
-        save_storage()
-        print(f"Удалено старых игр (>{days_old} дней): {len(games_to_remove)}")
+    storage.update_data(update_storage)
 
 # ------------------ КОМАНДЫ ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start"""
-    user = get_user(update.effective_user.id)
-    user["state"] = None
-    save_storage()
+    user_id = update.effective_user.id
+    
+    def updater(user):
+        user["state"] = None
+    
+    update_user(user_id, updater)
 
     welcome_text = (
         f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
@@ -166,9 +246,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /menu для возврата в главное меню"""
-    user = get_user(update.effective_user.id)
-    user["state"] = None
-    save_storage()
+    user_id = update.effective_user.id
+    
+    def updater(user):
+        user["state"] = None
+    
+    update_user(user_id, updater)
 
     welcome_text = (
         f"{EMOJI['gift']} <b>Главное меню</b>\n\n"
@@ -191,13 +274,16 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /cancel для отмены текущего действия"""
-    user = get_user(update.effective_user.id)
-    user["state"] = None
-    if "tmp_name" in user:
-        del user["tmp_name"]
-    if "tmp_game_id" in user:
-        del user["tmp_game_id"]
-    save_storage()
+    user_id = update.effective_user.id
+    
+    def updater(user):
+        user["state"] = None
+        if "tmp_name" in user:
+            del user["tmp_name"]
+        if "tmp_game_id" in user:
+            del user["tmp_game_id"]
+    
+    update_user(user_id, updater)
     
     await update.message.reply_text(
         f"{EMOJI['check']} Действие отменено. Используй /menu для возврата в меню."
@@ -237,17 +323,18 @@ async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = str(query.from_user.id)
+    data = storage.get_data()
     
     # Находим все активные игры пользователя
     user_games = []
-    for game_id, game in storage["games"].items():
+    for game_id, game in data["games"].items():
         if user_id in game["players"] and not game.get("started", False):
             user_games.append(game)
     
     if not user_games:
         # Показываем завершенные игры отдельно
         finished_games = []
-        for game_id, game in storage["games"].items():
+        for game_id, game in data["games"].items():
             if user_id in game["players"] and game.get("started", False):
                 finished_games.append(game)
         
@@ -312,7 +399,7 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[1]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game or game.get("started", False):
         await query.edit_message_text(
@@ -333,10 +420,10 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}"
     )
     
-    user = get_user(user_id)
+    user_data = get_user_data(user_id)
     has_wishes = False
-    if "wishes" in user and game_id in user["wishes"]:
-        wishes = user["wishes"][game_id]
+    if "wishes" in user_data and game_id in user_data["wishes"]:
+        wishes = user_data["wishes"][game_id]
         if wishes.get("wish") or wishes.get("not_wish"):
             has_wishes = True
     
@@ -377,9 +464,12 @@ async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user = get_user(query.from_user.id)
-    user["state"] = "wait_game_name"
-    save_storage()
+    user_id = query.from_user.id
+    
+    def updater(user):
+        user["state"] = "wait_game_name"
+    
+    update_user(user_id, updater)
 
     await query.edit_message_text(
         f"{EMOJI['create']} <b>Создание игры</b>\n\n"
@@ -395,19 +485,22 @@ async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------ ТЕКСТОВЫЙ ОБРАБОТЧИК ------------------
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.message.from_user.id)
-    user = get_user(user_id)
+    user_id = update.message.from_user.id
+    user_data = get_user_data(user_id)
+    user_state = user_data.get("state")
     
     # ---- НАЗВАНИЕ ИГРЫ ----
-    if user.get("state") == "wait_game_name":
+    if user_state == "wait_game_name":
         name = update.message.text.strip()
         if len(name) < 2:
             await update.message.reply_text(f"{EMOJI['cross']} Слишком короткое название. Минимум 2 символа:")
             return
             
-        user["tmp_name"] = name
-        user["state"] = "wait_game_amount"
-        save_storage()
+        def updater(user):
+            user["tmp_name"] = name
+            user["state"] = "wait_game_amount"
+        
+        update_user(user_id, updater)
         
         await update.message.reply_text(
             f"{EMOJI['money']} Сумма подарка\n\nВведи сумму в рублях:\n\n"
@@ -419,16 +512,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ---- БЮДЖЕТ ИГРЫ ----
-    if user.get("state") == "wait_game_amount":
-        if "tmp_name" not in user:
+    if user_state == "wait_game_amount":
+        user_data = get_user_data(user_id)
+        if "tmp_name" not in user_data:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Ошибка. Начни заново: /menu",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
             )
-            user["state"] = None
-            save_storage()
+            
+            def updater(user):
+                user["state"] = None
+            
+            update_user(user_id, updater)
             return
             
         try:
@@ -463,34 +560,51 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         game_id = gen_game_id()
+        user_data = get_user_data(user_id)
         
         if amount.is_integer():
             amount_str = str(int(amount))
         else:
             amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
         
-        game_name = escape_markdown(user["tmp_name"])
+        game_name = escape_markdown(user_data["tmp_name"])
         
-        storage["games"][game_id] = {
-            "id": game_id,
-            "name": user["tmp_name"],
-            "amount": amount_str,
-            "owner": user_id,
-            "players": [user_id],
-            "started": False,
-            "pairs": {},
-            "created_time": time.time(),
-            "last_modified": time.time()
-        }
-
-        del user["tmp_name"]
-        user["state"] = None
-        user.setdefault("games", []).append(game_id)
-        save_storage()
+        def create_game_updater(data):
+            data["games"][game_id] = {
+                "id": game_id,
+                "name": user_data["tmp_name"],
+                "amount": amount_str,
+                "owner": str(user_id),
+                "players": [str(user_id)],
+                "started": False,
+                "pairs": {},
+                "created_time": time.time(),
+                "last_modified": time.time()
+            }
+        
+        def user_updater(user):
+            user["state"] = None
+            if "tmp_name" in user:
+                del user["tmp_name"]
+            user.setdefault("games", []).append(game_id)
+        
+        def combined_updater(data):
+            create_game_updater(data)
+            user_id_str = str(user_id)
+            if user_id_str not in data["users"]:
+                data["users"][user_id_str] = {
+                    "state": None,
+                    "games": [],
+                    "wishes": {},
+                    "preferences": {},
+                    "notified_games": []
+                }
+            user_updater(data["users"][user_id_str])
+        
+        storage.update_data(combined_updater)
 
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
         
-        # ИСПРАВЛЕННЫЙ ТЕКСТ: убрали "(включая тебя)"
         text = (
             f"{EMOJI['tree']}✨ <b>Игра «{game_name}» готова!</b>\n\n"
             f"{EMOJI['money']} <b>Сумма:</b> {amount_str} ₽\n"
@@ -543,7 +657,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     # ---- ПРИСОЕДИНЕНИЕ ПО КОДУ ----
-    if user.get("state") == "wait_join_code":
+    if user_state == "wait_join_code":
         await update.message.reply_text(
             f"{EMOJI['info']} <b>Для присоединения к игре нужна ссылка от организатора</b>\n\n"
             f"{EMOJI['santa']} Попроси у организатора игры ссылку-приглашение и просто перейди по ней!\n\n"
@@ -555,36 +669,44 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
             ])
         )
-        user["state"] = None
-        save_storage()
+        
+        def updater(user):
+            user["state"] = None
+        
+        update_user(user_id, updater)
         return
         
     # ---- ИЗМЕНЕНИЕ СУММЫ ----
-    if user.get("state") and user["state"].startswith("wait_new_amount_"):
-        game_id = user["state"].split("_")[-1]
+    if user_state and user_state.startswith("wait_new_amount_"):
+        game_id = user_state.split("_")[-1]
         
-        if game_id not in storage["games"]:
+        game = get_game_data(game_id)
+        if not game:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Игра не найдена.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
             )
-            user["state"] = None
-            save_storage()
+            
+            def updater(user):
+                user["state"] = None
+            
+            update_user(user_id, updater)
             return
 
-        game = storage["games"][game_id]
-        
-        if user_id != game["owner"]:
+        if str(user_id) != game["owner"]:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Только создатель игры может менять сумму.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
             )
-            user["state"] = None
-            save_storage()
+            
+            def updater(user):
+                user["state"] = None
+            
+            update_user(user_id, updater)
             return
 
         try:
@@ -615,17 +737,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
         
         old_amount = game["amount"]
-        game["amount"] = amount_str
-        game["last_modified"] = time.time()
-        user["state"] = None
-        save_storage()
+        
+        def game_updater(game_data):
+            game_data["amount"] = amount_str
+            game_data["last_modified"] = time.time()
+        
+        def user_updater(user):
+            user["state"] = None
+        
+        def combined_updater(data):
+            if game_id in data["games"]:
+                game_updater(data["games"][game_id])
+            user_id_str = str(user_id)
+            if user_id_str in data["users"]:
+                user_updater(data["users"][user_id_str])
+        
+        storage.update_data(combined_updater)
         
         game_name = escape_markdown(game["name"])
 
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Сумма обновлена!</b>\n\n"
             f"{EMOJI['tree']} <b>{game_name}</b>\n"
-            f"{EMOJI['money']} <b>Бюджет:</b> {old_amount} → {game['amount']} ₽\n"
+            f"{EMOJI['money']} <b>Бюджет:</b> {old_amount} → {amount_str} ₽\n"
             f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -636,13 +770,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Уведомляем участников об изменении суммы
         for uid in game["players"]:
-            if uid != user_id:  # Не уведомляем организатора (он уже знает)
+            if uid != str(user_id):  # Не уведомляем организатора (он уже знает)
                 try:
                     await context.bot.send_message(
                         uid,
                         f"{EMOJI['bell']} <b>Изменение бюджета игры</b>\n\n"
                         f"{EMOJI['tree']} Игра: <b>{game_name}</b>\n"
-                        f"{EMOJI['money']} <b>Новый бюджет:</b> {game['amount']} ₽ (было: {old_amount} ₽)\n\n"
+                        f"{EMOJI['money']} <b>Новый бюджет:</b> {amount_str} ₽ (было: {old_amount} ₽)\n\n"
                         f"{EMOJI['info']} Организатор изменил сумму подарка.",
                         parse_mode="HTML"
                     )
@@ -652,18 +786,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ---- ПОЖЕЛАНИЯ: ХОЧУ ----
-    if user.get("state") and user["state"].startswith("wait_wish_want_"):
-        game_id = user["state"].split("_")[-1]
+    if user_state and user_state.startswith("wait_wish_want_"):
+        game_id = user_state.split("_")[-1]
         
-        if game_id not in storage["games"]:
+        game = get_game_data(game_id)
+        if not game:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Игра не найдена.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
             )
-            user["state"] = None
-            save_storage()
+            
+            def updater(user):
+                user["state"] = None
+            
+            update_user(user_id, updater)
             return
         
         wish_text = update.message.text.strip()
@@ -676,9 +814,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        user.setdefault("wishes", {}).setdefault(game_id, {})["wish"] = wish_text
-        user["state"] = f"wait_wish_not_{game_id}"
-        save_storage()
+        def updater(user):
+            user.setdefault("wishes", {}).setdefault(game_id, {})["wish"] = wish_text
+            user["state"] = f"wait_wish_not_{game_id}"
+        
+        update_user(user_id, updater)
         
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Отлично!</b> А теперь напиши, что бы ты НЕ хотел(а) получить:\n\n"
@@ -696,18 +836,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ---- ПОЖЕЛАНИЯ: НЕ ХОЧУ ----
-    if user.get("state") and user["state"].startswith("wait_wish_not_"):
-        game_id = user["state"].split("_")[-1]
+    if user_state and user_state.startswith("wait_wish_not_"):
+        game_id = user_state.split("_")[-1]
         
-        if game_id not in storage["games"]:
+        game = get_game_data(game_id)
+        if not game:
             await update.message.reply_text(
                 f"{EMOJI['cross']} Игра не найдена.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
                 ])
             )
-            user["state"] = None
-            save_storage()
+            
+            def updater(user):
+                user["state"] = None
+            
+            update_user(user_id, updater)
             return
         
         not_wish_text = update.message.text.strip()
@@ -720,11 +864,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = not_wish_text
-        user["state"] = None
-        save_storage()
+        def updater(user):
+            user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = not_wish_text
+            user["state"] = None
         
-        game = storage["games"][game_id]
+        update_user(user_id, updater)
+        
         game_name = escape_markdown(game["name"])
         
         await update.message.reply_text(
@@ -744,9 +889,12 @@ async def join_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user = get_user(query.from_user.id)
-    user["state"] = "wait_join_code"
-    save_storage()
+    user_id = query.from_user.id
+    
+    def updater(user):
+        user["state"] = "wait_join_code"
+    
+    update_user(user_id, updater)
 
     await query.edit_message_text(
         f"{EMOJI['info']} <b>Для присоединения к игре нужна ссылка от организатора</b>\n\n"
@@ -766,7 +914,7 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[1]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer("Игра не найдена!", show_alert=True)
@@ -775,7 +923,6 @@ async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
     game_name = escape_markdown(game["name"])
     
-    # ИСПРАВЛЕННЫЙ ТЕКСТ для приглашения
     text = (
         f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
         f"{EMOJI['tree']} <b>{game_name}</b>\n"
@@ -803,7 +950,7 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     game_id = query.data.split("_")[1]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
 
     if not game:
         await query.edit_message_text(
@@ -824,10 +971,10 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_info = await context.bot.get_chat(int(uid))
             mention = get_user_html_mention(uid, user_info)
             
-            user = get_user(uid)
+            user_data = get_user_data(uid)
             has_wishes = False
-            if "wishes" in user and game_id in user["wishes"]:
-                wishes = user["wishes"][game_id]
+            if "wishes" in user_data and game_id in user_data["wishes"]:
+                wishes = user_data["wishes"][game_id]
                 if wishes.get("wish") or wishes.get("not_wish"):
                     has_wishes = True
             
@@ -878,14 +1025,19 @@ async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     _, game_id, uid = query.data.split("_")
-    game = storage["games"][game_id]
+    game = get_game_data(game_id)
 
     if uid in game["players"]:
         try:
             user_info = await context.bot.get_chat(int(uid))
             user_name = escape_markdown(user_info.first_name or user_info.username or "Игрок")
-            game["players"].remove(uid)
-            save_storage()
+            
+            def updater(data):
+                if game_id in data["games"]:
+                    if uid in data["games"][game_id]["players"]:
+                        data["games"][game_id]["players"].remove(uid)
+            
+            storage.update_data(updater)
             
             try:
                 await context.bot.send_message(
@@ -900,8 +1052,12 @@ async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             await query.answer(f"✅ {user_name} удален", show_alert=True)
         except:
-            game["players"].remove(uid)
-            save_storage()
+            def updater(data):
+                if game_id in data["games"]:
+                    if uid in data["games"][game_id]["players"]:
+                        data["games"][game_id]["players"].remove(uid)
+            
+            storage.update_data(updater)
             await query.answer("✅ Игрок удален", show_alert=True)
 
     await players_cb(update, context)
@@ -912,7 +1068,7 @@ async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[1]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
@@ -924,8 +1080,8 @@ async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"{EMOJI['cross']} Ты не участник этой игры!", show_alert=True)
         return
     
-    user = get_user(user_id)
-    current_wishes = user.get("wishes", {}).get(game_id, {})
+    user_data = get_user_data(user_id)
+    current_wishes = user_data.get("wishes", {}).get(game_id, {})
     wish_text = current_wishes.get("wish", "")
     not_wish_text = current_wishes.get("not_wish", "")
     
@@ -959,8 +1115,10 @@ async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
     else:
-        user["state"] = f"wait_wish_want_{game_id}"
-        save_storage()
+        def updater(user):
+            user["state"] = f"wait_wish_want_{game_id}"
+        
+        update_user(query.from_user.id, updater)
         
         await query.edit_message_text(
             f"{EMOJI['wish']} <b>Укажи свои пожелания для подарка</b>\n\n"
@@ -984,16 +1142,18 @@ async def edit_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[2]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
         return
     
     user_id = str(query.from_user.id)
-    user = get_user(user_id)
-    user["state"] = f"wait_wish_want_{game_id}"
-    save_storage()
+    
+    def updater(user):
+        user["state"] = f"wait_wish_want_{game_id}"
+    
+    update_user(query.from_user.id, updater)
     
     await query.edit_message_text(
         f"{EMOJI['edit']} <b>Изменение пожеланий</b>\n\n"
@@ -1016,18 +1176,19 @@ async def delete_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[2]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
         return
     
-    user_id = str(query.from_user.id)
-    user = get_user(user_id)
+    user_id = query.from_user.id
     
-    if "wishes" in user and game_id in user["wishes"]:
-        del user["wishes"][game_id]
-        save_storage()
+    def updater(user):
+        if "wishes" in user and game_id in user["wishes"]:
+            del user["wishes"][game_id]
+    
+    update_user(user_id, updater)
     
     await query.answer("✅ Пожелания удалены", show_alert=True)
     await wish_cb(update, context)
@@ -1037,18 +1198,19 @@ async def skip_not_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     game_id = query.data.split("_")[3]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
         return
     
-    user_id = str(query.from_user.id)
-    user = get_user(user_id)
+    user_id = query.from_user.id
     
-    user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = ""
-    user["state"] = None
-    save_storage()
+    def updater(user):
+        user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = ""
+        user["state"] = None
+    
+    update_user(user_id, updater)
     
     game_name = escape_markdown(game["name"])
     
@@ -1069,18 +1231,18 @@ async def skip_wish_suggestion_cb(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     
     game_id = query.data.split("_")[3]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
         return
     
-    user_id = str(query.from_user.id)
-    user = get_user(user_id)
+    user_id = query.from_user.id
     
-    # Добавляем игру в список, где уже предлагали пожелания
-    user.setdefault("notified_games", []).append(game_id)
-    save_storage()
+    def updater(user):
+        user.setdefault("notified_games", []).append(game_id)
+    
+    update_user(user_id, updater)
     
     await query.edit_message_text(
         f"{EMOJI['check']} <b>Хорошо!</b>\n\n"
@@ -1094,7 +1256,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     game_id = query.data.split("_")[2]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
@@ -1121,10 +1283,13 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         receiver = players[(i + 1) % len(players)]
         pairs[giver] = receiver
 
-    game["pairs"] = pairs
-    game["started"] = True
-    game["finished_time"] = time.time()
-    save_storage()
+    def updater(data):
+        if game_id in data["games"]:
+            data["games"][game_id]["pairs"] = pairs
+            data["games"][game_id]["started"] = True
+            data["games"][game_id]["finished_time"] = time.time()
+    
+    storage.update_data(updater)
 
     success_count = 0
     for giver, receiver in pairs.items():
@@ -1133,7 +1298,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             receiver_mention = get_user_html_mention(receiver, receiver_info)
             
             receiver_wishes = ""
-            receiver_user = get_user(receiver)
+            receiver_user = get_user_data(receiver)
             if "wishes" in receiver_user and game_id in receiver_user["wishes"]:
                 wishes = receiver_user["wishes"][game_id]
                 if wishes.get("wish"):
@@ -1167,7 +1332,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Ошибка отправки сообщения {giver}: {e}")
 
-    # ИСПРАВЛЕНИЕ: Отправляем организатору список пар в СПОЙЛЕРЕ
+    # Отправляем организатору список пар в СПОЙЛЕРЕ
     try:
         pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя)</b>\n\n"
         pairs_list += "<spoiler>🔒 Нажми, чтобы увидеть список пар:\n\n"
@@ -1194,10 +1359,10 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Ошибка отправки списка пар организатору: {e}")
 
-    # ИСПРАВЛЕННЫЙ ТЕКСТ напоминания о пожеланиях
+    # Напоминание о пожеланиях
     for uid in game["players"]:
-        user = get_user(uid)
-        if "wishes" not in user or game_id not in user["wishes"] or not user["wishes"][game_id].get("wish"):
+        user_data = get_user_data(uid)
+        if "wishes" not in user_data or game_id not in user_data["wishes"] or not user_data["wishes"][game_id].get("wish"):
             try:
                 await context.bot.send_message(
                     uid,
@@ -1234,7 +1399,7 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     game_id = query.data.split("_")[1]
-    game = storage["games"].get(game_id)
+    game = get_game_data(game_id)
     
     if not game:
         await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
@@ -1256,8 +1421,11 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
     
-    storage["games"].pop(game_id, None)
-    save_storage()
+    def updater(data):
+        if game_id in data["games"]:
+            del data["games"][game_id]
+    
+    storage.update_data(updater)
 
     await query.edit_message_text(
         f"{EMOJI['check']} <b>Игра удалена</b>\n\n"
@@ -1275,22 +1443,25 @@ async def edit_amount_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     game_id = query.data.split("_")[2]
-    game = storage["games"][game_id]
+    game = get_game_data(game_id)
     
     if query.from_user.id != int(game["owner"]):
         await query.answer(f"{EMOJI['cross']} Только создатель игры может менять сумму!", show_alert=True)
         return
 
-    user = get_user(query.from_user.id)
-    user["state"] = f"wait_new_amount_{game_id}"
-    save_storage()
+    user_id = query.from_user.id
+    
+    def updater(user):
+        user["state"] = f"wait_new_amount_{game_id}"
+    
+    update_user(user_id, updater)
 
     await query.edit_message_text(
         f"{EMOJI['edit']} <b>Изменение суммы</b>\n\n"
         f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
         f"{EMOJI['money']} Текущая сумма: {game['amount']} ₽\n\n"
         f"Введи новую сумму:\n\n"
-        f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+        f"{EMOJI['info']} <i>Используй /cancel для отмена</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
@@ -1302,13 +1473,16 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user = get_user(query.from_user.id)
-    user["state"] = None
-    if "tmp_name" in user:
-        del user["tmp_name"]
-    if "tmp_game_id" in user:
-        del user["tmp_game_id"]
-    save_storage()
+    user_id = query.from_user.id
+    
+    def updater(user):
+        user["state"] = None
+        if "tmp_name" in user:
+            del user["tmp_name"]
+        if "tmp_game_id" in user:
+            del user["tmp_game_id"]
+    
+    update_user(user_id, updater)
 
     welcome_text = (
         f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
@@ -1335,7 +1509,7 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
     args = context.args
     if args and len(args[0]) == 8:
         game_id = args[0]
-        game = storage["games"].get(game_id)
+        game = get_game_data(game_id)
         
         if not game:
             await update.message.reply_text(
@@ -1375,17 +1549,31 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         
-        game["players"].append(user_id)
-        user = get_user(user_id)
-        user.setdefault("games", []).append(game_id)
-        save_storage()
+        def updater(data):
+            if game_id in data["games"]:
+                if user_id not in data["games"][game_id]["players"]:
+                    data["games"][game_id]["players"].append(user_id)
+            
+            if user_id not in data["users"]:
+                data["users"][user_id] = {
+                    "state": None,
+                    "games": [],
+                    "wishes": {},
+                    "preferences": {},
+                    "notified_games": []
+                }
+            
+            if game_id not in data["users"][user_id]["games"]:
+                data["users"][user_id]["games"].append(game_id)
+        
+        storage.update_data(updater)
         
         try:
             await context.bot.send_message(
                 game["owner"],
                 f"{EMOJI['bell']} <b>Новый участник!</b>\n\n"
                 f"К игре '{escape_markdown(game['name'])}' присоединился новый участник.\n"
-                f"{EMOJI['users']} Теперь участников: {len(game['players'])}",
+                f"{EMOJI['users']} Теперь участников: {len(game['players']) + 1}",  # +1 потому что еще не обновился game в памяти
                 parse_mode="HTML"
             )
         except:
@@ -1395,7 +1583,7 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
             f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
             f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
-            f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+            f"{EMOJI['users']} <b>Участников:</b> {len(game['players']) + 1}\n\n"
             f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -1403,9 +1591,9 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
             ])
         )
         
-        # Мягкое предложение указать пожелания (только если еще не предлагали для этой игры)
-        user = get_user(user_id)
-        if game_id not in user.get("notified_games", []):
+        # Мягкое предложение указать пожелания
+        user_data = get_user_data(user_id)
+        if game_id not in user_data.get("notified_games", []):
             try:
                 await context.bot.send_message(
                     user_id,
@@ -1424,9 +1612,11 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
                         ]
                     ])
                 )
-                # Добавляем игру в список, где уже предлагали
-                user.setdefault("notified_games", []).append(game_id)
-                save_storage()
+                
+                def notify_updater(user):
+                    user.setdefault("notified_games", []).append(game_id)
+                
+                update_user(update.effective_user.id, notify_updater)
             except Exception as e:
                 print(f"Ошибка отправки предложения участнику: {e}")
             
@@ -1443,8 +1633,9 @@ async def lifespan(app: FastAPI):
     
     print("🎅 Инициализация Тайного Санты...")
     
-    # Очищаем только старые игры (более 30 дней)
-    cleanup_old_games(days_old=30)
+    # Убедимся, что данные загружены
+    data = storage.get_data()
+    print(f"✅ Данные загружены: {len(data['games'])} игр, {len(data['users'])} пользователей")
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -1477,9 +1668,14 @@ async def lifespan(app: FastAPI):
         await application.bot.set_webhook(WEBHOOK_URL)
         print(f"✅ Webhook установлен на {WEBHOOK_URL}")
     
-    print(f"✅ Тайный Санта готов! Всего пользователей: {len(storage['users'])}")
-    print(f"🎮 Активных игр: {len([g for g in storage['games'].values() if not g.get('started', False)])}")
-    print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
+    active_games = len([g for g in data['games'].values() if not g.get('started', False)])
+    finished_games = len([g for g in data['games'].values() if g.get('started', False)])
+    
+    print(f"🎅 Тайный Санта готов!")
+    print(f"🎮 Активных игр: {active_games}")
+    print(f"📚 Завершенных игр: {finished_games}")
+    print(f"👤 Всего пользователей: {len(data['users'])}")
+    print(f"📖 FAQ канал: {FAQ_CHANNEL_LINK}")
     
     yield
     
@@ -1510,16 +1706,17 @@ async def webhook(req: Request):
 @app.get("/")
 async def health_check():
     """Health check endpoint"""
-    active_games = len([g for g in storage["games"].values() if not g.get("started", False)])
-    finished_games = len([g for g in storage["games"].values() if g.get("started", False)])
+    data = storage.get_data()
+    active_games = len([g for g in data["games"].values() if not g.get("started", False)])
+    finished_games = len([g for g in data["games"].values() if g.get("started", False)])
     
     return {
         "status": "ok", 
         "message": "🎅 Тайный Санта работает",
-        "games_count": len(storage["games"]),
+        "games_count": len(data["games"]),
         "active_games": active_games,
         "finished_games": finished_games,
-        "users_count": len(storage["users"]),
+        "users_count": len(data["users"]),
         "faq_channel": FAQ_CHANNEL_LINK
     }
 
@@ -1527,11 +1724,13 @@ async def health_check():
 def main():
     """Запуск FastAPI приложения"""
     print(f"🎄 Запуск на порту {PORT}")
-    print(f"📊 Всего пользователей: {len(storage['users'])}")
-    print(f"🎮 Всего игр: {len(storage['games'])}")
     
-    active_games = len([g for g in storage["games"].values() if not g.get("started", False)])
-    finished_games = len([g for g in storage["games"].values() if g.get("started", False)])
+    data = storage.get_data()
+    print(f"📊 Всего пользователей: {len(data['users'])}")
+    print(f"🎮 Всего игр: {len(data['games'])}")
+    
+    active_games = len([g for g in data["games"].values() if not g.get("started", False)])
+    finished_games = len([g for g in data["games"].values() if g.get("started", False)])
     
     print(f"   Активных: {active_games}")
     print(f"   Завершенных: {finished_games}")
