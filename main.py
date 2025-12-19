@@ -129,7 +129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Создаем пользователя если его нет
     if user_id not in users_db:
         users_db[user_id] = {"games": [], "state": None}
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         print(f"👤 Новый пользователь: {user_id}")
     
     text = (
@@ -152,7 +152,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in users_db:
         users_db[user_id]["state"] = None
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
     
     text = f"{EMOJI['gift']} <b>Главное меню</b>"
     
@@ -192,10 +192,10 @@ async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Создаем пользователя если его нет
     if user_id not in users_db:
         users_db[user_id] = {"games": [], "state": None}
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
     
     users_db[user_id]["state"] = "wait_game_name"
-    save_storage()  # СОХРАНЯЕМ
+    save_storage()
     
     await query.edit_message_text(
         f"{EMOJI['create']} <b>Создание игры</b>\n\n"
@@ -286,8 +286,49 @@ async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать участников игры"""
+async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = str(query.from_user.id)
+    if user_id in users_db:
+        users_db[user_id]["state"] = None
+        save_storage()
+    
+    text = f"{EMOJI['gift']} <b>Главное меню</b>"
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+        [InlineKeyboardButton(f"{EMOJI['help']} Помощь", callback_data="help")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def help_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Помощь"""
+    query = update.callback_query
+    await query.answer()
+    
+    text = (
+        f"{EMOJI['help']} <b>Помощь</b>\n\n"
+        f"🎮 <b>Как играть:</b>\n"
+        f"1. Создай игру\n"
+        f"2. Пригласи друзей по ссылке\n"
+        f"3. Запусти распределение\n\n"
+        f"🎅 <b>Бот активен 24/7!</b>\n"
+        f"Игры сохраняются в памяти и не пропадают."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приглашение"""
     query = update.callback_query
     await query.answer()
     
@@ -298,7 +339,38 @@ async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Игра не найдена!", show_alert=True)
         return
     
-    user_id = str(query.from_user.id)
+    invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
+    
+    text = (
+        f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
+        f"{EMOJI['tree']} <b>{game['name']}</b>\n"
+        f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+        f"{EMOJI['link']} <b>Ссылка для присоединения:</b>\n"
+        f"{invite_link}\n\n"
+        f"Отправь эту ссылку друзьям!"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['back']} Назад", callback_data=f"game_{game_id}")],
+        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+# ------------------ ОБРАБОТЧИКИ ДЛЯ НЕДОСТАЮЩИХ КНОПОК ------------------
+
+async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Участники игры"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[1]
+    game = games_db.get(game_id)
+    
+    if not game:
+        await query.answer("Игра не найдена!", show_alert=True)
+        return
     
     # Получаем информацию об участниках
     players_text = f"{EMOJI['users']} <b>Участники игры:</b>\n\n"
@@ -373,7 +445,7 @@ async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сохраняем пары и отмечаем игру как запущенную
     game["pairs"] = pairs
     game["started"] = True
-    save_storage()  # СОХРАНЯЕМ
+    save_storage()
     
     # Отправляем сообщения участникам
     success_count = 0
@@ -487,7 +559,7 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Удаляем игру из базы данных
     del games_db[game_id]
-    save_storage()  # СОХРАНЯЕМ
+    save_storage()
     
     # Удаляем игру из списков пользователей
     for uid, user_data in users_db.items():
@@ -503,78 +575,6 @@ async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
         ])
     )
-
-async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = str(query.from_user.id)
-    if user_id in users_db:
-        users_db[user_id]["state"] = None
-        save_storage()  # СОХРАНЯЕМ
-    
-    text = f"{EMOJI['gift']} <b>Главное меню</b>"
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
-        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
-        [InlineKeyboardButton(f"{EMOJI['help']} Помощь", callback_data="help")]
-    ]
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
-async def help_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Помощь"""
-    query = update.callback_query
-    await query.answer()
-    
-    text = (
-        f"{EMOJI['help']} <b>Помощь</b>\n\n"
-        f"🎮 <b>Как играть:</b>\n"
-        f"1. Создай игру\n"
-        f"2. Пригласи друзей по ссылке\n"
-        f"3. Запусти распределение\n\n"
-        f"🎅 <b>Бот активен 24/7!</b>\n"
-        f"Игры сохраняются и не пропадают."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
-    ]
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
-async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приглашение"""
-    query = update.callback_query
-    await query.answer()
-    
-    game_id = query.data.split("_")[1]
-    game = games_db.get(game_id)
-    
-    if not game:
-        await query.answer("Игра не найдена!", show_alert=True)
-        return
-    
-    invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
-    
-    text = (
-        f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
-        f"{EMOJI['tree']} <b>{game['name']}</b>\n"
-        f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
-        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
-        f"{EMOJI['link']} <b>Ссылка для присоединения:</b>\n"
-        f"{invite_link}\n\n"
-        f"Отправь эту ссылку друзьям!"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['back']} Назад", callback_data=f"game_{game_id}")],
-        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
-    ]
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Пожелания"""
@@ -597,7 +597,7 @@ async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Устанавливаем состояние для получения пожеланий
     if user_id in users_db:
         users_db[user_id]["state"] = f"wait_wish_{game_id}"
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
     
     await query.edit_message_text(
         f"{EMOJI['wish']} <b>Укажи свои пожелания</b>\n\n"
@@ -633,7 +633,7 @@ async def edit_amount_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Устанавливаем состояние для получения новой суммы
     if user_id in users_db:
         users_db[user_id]["state"] = f"wait_amount_{game_id}"
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
     
     await query.edit_message_text(
         f"{EMOJI['edit']} <b>Изменение суммы</b>\n\n"
@@ -654,7 +654,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Создаем пользователя если его нет
     if user_id not in users_db:
         users_db[user_id] = {"games": [], "state": None}
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
     
     user_state = users_db[user_id].get("state")
     
@@ -666,7 +666,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         users_db[user_id]["tmp_name"] = text
         users_db[user_id]["state"] = "wait_game_amount"
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         
         await update.message.reply_text(
             f"{EMOJI['money']} Отлично! Теперь введи сумму подарка в рублях:\n\n"
@@ -721,7 +721,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users_db[user_id]["games"].append(game_id)
         users_db[user_id]["state"] = None
         del users_db[user_id]["tmp_name"]
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         
         # ОТПРАВЛЯЕМ ОТВЕТ
         invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
@@ -772,7 +772,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         users_db[user_id]["wishes"][game_id] = text
         users_db[user_id]["state"] = None
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Пожелания сохранены!</b>\n\n"
@@ -816,7 +816,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game["amount"] = amount_str
         game["last_modified"] = time.time()
         users_db[user_id]["state"] = None
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Сумма обновлена!</b>\n\n"
@@ -885,7 +885,7 @@ async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_
         if user_id not in users_db:
             users_db[user_id] = {"games": [], "state": None}
         users_db[user_id]["games"].append(game_id)
-        save_storage()  # СОХРАНЯЕМ
+        save_storage()
         
         await update.message.reply_text(
             f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
