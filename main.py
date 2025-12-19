@@ -59,28 +59,28 @@ EMOJI = {
 }
 
 def escape_markdown(text):
-"""Экранирует спецсимволы Markdown"""
-if not text:
-return ""
-escape_chars = r'\_*[]()~`>#+-=|{}.!'
-return ''.join(['\\' + char if char in escape_chars else char for char in text])
+    """Экранирует спецсимволы Markdown"""
+    if not text:
+        return ""
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return ''.join(['\\' + char if char in escape_chars else char for char in text])
 
 def get_user_html_mention(user_id, user_info):
-"""Возвращает HTML-упоминание пользователя"""
-if not user_info:
-return "Анонимный Санта"
+    """Возвращает HTML-упоминание пользователя"""
+    if not user_info:
+        return "Анонимный Санта"
 
-name = ""
-if user_info.first_name:
-name = escape_markdown(user_info.first_name)
-if user_info.last_name:
-name += f" {escape_markdown(user_info.last_name)}"
-elif user_info.username:
-name = f"@{user_info.username}"
-else:
-name = "Анонимный Санта"
+    name = ""
+    if user_info.first_name:
+        name = escape_markdown(user_info.first_name)
+        if user_info.last_name:
+            name += f" {escape_markdown(user_info.last_name)}"
+    elif user_info.username:
+        name = f"@{user_info.username}"
+    else:
+        name = "Анонимный Санта"
 
-return f'<a href="tg://user?id={user_id}">{name}</a>'
+    return f'<a href="tg://user?id={user_id}">{name}</a>'
 
 # ------------------ ХРАНИЛИЩЕ ------------------
 def load_storage():
