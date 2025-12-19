@@ -2,730 +2,1513 @@ import json
 import os
 import uuid
 import random
-import time
-import threading
-import requests
 from contextlib import asynccontextmanager
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import (
+Update,
+InlineKeyboardButton,
+InlineKeyboardMarkup,
+)
+from telegram.ext import (
+Application,
+CallbackQueryHandler,
+CommandHandler,
+MessageHandler,
+ContextTypes,
+filters,
+)
 from fastapi import FastAPI, Request
 import uvicorn
 
-print("🚀 Запуск Тайного Санты...")
-
-# ------------------ НАСТРОЙКИ ------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 10000))
-
-if not BOT_TOKEN:
-    print("❌ ОШИБКА: BOT_TOKEN не установлен!")
-    print("ℹ️ Установите переменную окружения BOT_TOKEN")
-    exit(1)
-
-print(f"✅ Токен есть")
-print(f"🌐 Порт: {PORT}")
-
-# ------------------ ХРАНИЛИЩЕ В ПАМЯТИ ------------------
-games_db = {}     # {game_id: game_data}
-users_db = {}     # {user_id: user_data}
+STORAGE_FILE = "storage.json"
+FAQ_CHANNEL_LINK = "https://t.me/ssr_faq"  # Ссылка на ваш канал
 
 # ------------------ ЭМОДЗИ ------------------
 EMOJI = {
-    "santa": "🎅", "gift": "🎁", "tree": "🎄", "money": "💰",
-    "users": "👥", "create": "✨", "list": "📋", "home": "🏠",
-    "cross": "❌", "check": "✅", "info": "ℹ️", "link": "🔗",
-    "help": "❓", "crown": "👑", "play": "▶️", "wish": "🎯",
-    "bell": "🔔", "star": "⭐", "back": "⬅️", "mail": "📨",
-    "lock": "🔒", "edit": "✏️", "trash": "🗑️", "join": "🔗"
+"santa": "🎅",
+"gift": "🎁",
+"tree": "🎄",
+"snowflake": "❄️",
+"star": "⭐",
+"bell": "🔔",
+"party": "🎉",
+"user": "👤",
+"users": "👥",
+"money": "💰",
+"back": "⬅️",
+"trash": "🗑️",
+"edit": "✏️",
+"join": "🔗",
+"create": "✨",
+"play": "▶️",
+"list": "📋",
+"check": "✅",
+"cross": "❌",
+"info": "ℹ️",
+"link": "🔗",
+"home": "🏠",
+"crown": "👑",
+"mail": "📨",
+"lock": "🔒",
+"wish": "🎯",
+"not_wish": "🙅",
+    "preferences": "📝",
+    "help": "❓"
 }
 
-# ------------------ АКТИВНЫЙ ПИНГ ------------------
-def active_ping():
-    """Активный пинг каждые 2 минуты чтобы бот не спал"""
-    print("🔔 Запускаю активный пинг...")
-    
-    # Определяем URL автоматически
-    base_url = None
-    
-    # Проверяем разные хостинги
-    if "RENDER_EXTERNAL_URL" in os.environ:
-        base_url = os.environ['RENDER_EXTERNAL_URL']
-        print(f"🎨 Определен Render: {base_url}")
-    elif "RAILWAY_STATIC_URL" in os.environ:
-        base_url = f"https://{os.environ['RAILWAY_STATIC_URL']}"
-        print(f"🚂 Определен Railway: {base_url}")
-    elif "HEROKU_APP_NAME" in os.environ:
-        base_url = f"https://{os.environ['HEROKU_APP_NAME']}.herokuapp.com"
-        print(f"⚡ Определен Heroku: {base_url}")
-    else:
-        # Если не на хостинге, пинг не нужен
-        print("💻 Локальный режим, пинг не требуется")
-        return
-    
-    if not base_url.endswith('/'):
-        base_url += '/'
-    
-    print(f"🔗 Буду пинговать: {base_url}")
-    
-    while True:
-        try:
-            current_time = time.strftime("%H:%M:%S")
+def escape_markdown(text):
+"""Экранирует спецсимволы Markdown"""
+if not text:
+return ""
+escape_chars = r'\_*[]()~`>#+-=|{}.!'
+return ''.join(['\\' + char if char in escape_chars else char for char in text])
+
+def get_user_html_mention(user_id, user_info):
+"""Возвращает HTML-упоминание пользователя"""
+if not user_info:
+return "Анонимный Санта"
+
+name = ""
+if user_info.first_name:
+name = escape_markdown(user_info.first_name)
+if user_info.last_name:
+name += f" {escape_markdown(user_info.last_name)}"
+elif user_info.username:
+name = f"@{user_info.username}"
+else:
+name = "Анонимный Санта"
+
+return f'<a href="tg://user?id={user_id}">{name}</a>'
+
+# ------------------ ХРАНИЛИЩЕ ------------------
+def load_storage():
+if not os.path.exists(STORAGE_FILE):
+return {"games": {}, "users": {}}
+with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+return json.load(f)
+
+def save_storage():
+with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+json.dump(storage, f, ensure_ascii=False, indent=2)
+
+storage = load_storage()
+
+# ------------------ УТИЛИТЫ ------------------
+def gen_game_id():
+return str(uuid.uuid4())[:8]
+
+def get_user(uid):
+uid_str = str(uid)
+if uid_str not in storage["users"]:
+storage["users"][uid_str] = {
+"state": None,
+"games": [],
+            "wishes": {},  # Хранит пожелания по играм: {game_id: {"wish": "", "not_wish": ""}}
+            "preferences": {}  # Хранит предпочтения по играм
+}
+return storage["users"][uid_str]
+
+def cleanup_finished_games():
+"""Очищает завершенные игры из хранилища"""
+games_to_remove = []
+for game_id, game in storage["games"].items():
+if game["started"]:
+games_to_remove.append(game_id)
+
+for game_id in games_to_remove:
+        # Удаляем игру из списков пользователей
+for uid, user_data in storage["users"].items():
+if "games" in user_data and game_id in user_data["games"]:
+user_data["games"].remove(game_id)
             
-            # Пингуем основной endpoint
-            response = requests.get(base_url, timeout=10)
+            # Удаляем пожелания для этой игры
+if "wishes" in user_data and game_id in user_data["wishes"]:
+del user_data["wishes"][game_id]
             
-            if response.status_code == 200:
-                print(f"✅ [{current_time}] Пинг успешен")
-            else:
-                print(f"⚠️  [{current_time}] Статус: {response.status_code}")
-            
-            # Также пингуем другие endpoints для надежности
-            try:
-                requests.get(base_url + "ping", timeout=5)
-                requests.get(base_url + "wakeup", timeout=5)
-            except:
-                pass
-            
-        except Exception as e:
-            current_time = time.strftime("%H:%M:%S")
-            print(f"❌ [{current_time}] Ошибка пинга: {type(e).__name__}")
-        
-        # Ждем 2 минуты (меньше чем 15-минутный таймаут сна на хостингах)
-        time.sleep(120)
+if "preferences" in user_data and game_id in user_data["preferences"]:
+del user_data["preferences"][game_id]
+
+        # Удаляем саму игру
+del storage["games"][game_id]
+
+if games_to_remove:
+save_storage()
+print(f"Удалено завершенных игр: {len(games_to_remove)}")
 
 # ------------------ КОМАНДЫ ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    user_id = str(update.effective_user.id)
-    
-    # Создаем пользователя если его нет
-    if user_id not in users_db:
-        users_db[user_id] = {"games": [], "state": None}
-        print(f"👤 Новый пользователь: {user_id}")
-    
-    text = (
-        f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
-        f"Создай свою игру и пригласи друзей!\n"
-        f"Когда все соберутся — запусти распределение подарков."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+    """Обработка команды /start"""
+user = get_user(update.effective_user.id)
+user["state"] = None
+save_storage()
+
+welcome_text = (
+f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
+f"Создай свою игру или присоединись к существующей.\n"
+f"Когда все соберутся — запусти распределение!"
+)
+
+keyboard = [
+[InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+[InlineKeyboardButton(f"{EMOJI['join']} Присоединиться", callback_data="join_game")],
         [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
-        [InlineKeyboardButton(f"{EMOJI['help']} Помощь", callback_data="help")]
-    ]
-    
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        [InlineKeyboardButton(f"{EMOJI['help']} FAQ и инструкции", url=FAQ_CHANNEL_LINK)],
+]
+
+await update.message.reply_text(
+welcome_text,
+reply_markup=InlineKeyboardMarkup(keyboard),
+parse_mode="HTML"
+)
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /menu"""
-    user_id = str(update.effective_user.id)
-    
-    if user_id in users_db:
-        users_db[user_id]["state"] = None
-    
-    text = f"{EMOJI['gift']} <b>Главное меню</b>"
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+"""Команда /menu для возврата в главное меню"""
+user = get_user(update.effective_user.id)
+user["state"] = None
+save_storage()
+
+welcome_text = (
+f"{EMOJI['gift']} <b>Главное меню</b>\n\n"
+f"Создай свою игру или присоединись к существующей.\n"
+f"Когда все соберутся — запусти распределение!"
+)
+
+keyboard = [
+[InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+[InlineKeyboardButton(f"{EMOJI['join']} Присоединиться", callback_data="join_game")],
         [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
-        [InlineKeyboardButton(f"{EMOJI['help']} Помощь", callback_data="help")]
-    ]
-    
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        [InlineKeyboardButton(f"{EMOJI['help']} FAQ и инструкции", url=FAQ_CHANNEL_LINK)],
+]
+
+await update.message.reply_text(
+welcome_text,
+reply_markup=InlineKeyboardMarkup(keyboard),
+parse_mode="HTML"
+)
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+"""Команда /cancel для отмены текущего действия"""
+user = get_user(update.effective_user.id)
+user["state"] = None
+if "tmp_name" in user:
+del user["tmp_name"]
+if "tmp_game_id" in user:
+del user["tmp_game_id"]
+save_storage()
+
+await update.message.reply_text(
+f"{EMOJI['check']} Действие отменено. Используй /menu для возврата в меню."
+)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /help"""
-    text = (
-        f"{EMOJI['help']} <b>Помощь</b>\n\n"
-        f"🎯 <b>Как играть:</b>\n"
-        f"1. Создай игру\n"
-        f"2. Пригласи друзей по ссылке\n"
-        f"3. Запусти распределение\n\n"
-        f"🤖 <b>Команды:</b>\n"
-        f"/start - начать\n"
-        f"/menu - меню\n"
-        f"/help - помощь\n\n"
-        f"🎅 <b>Приятной игры!</b>"
+    """Команда /help с ссылкой на канал"""
+    help_text = (
+        f"{EMOJI['help']} <b>Помощь и инструкции</b>\n\n"
+        f"📚 <b>Полные инструкции здесь:</b>\n"
+        f"{FAQ_CHANNEL_LINK}\n\n"
+        f"🎯 <b>Быстрый старт:</b>\n"
+        f"1. Создай игру или присоединись\n"
+        f"2. Укажи пожелания для Санты\n"
+        f"3. Жди распределения\n\n"
+        f"🤖 <b>Основные команды:</b>\n"
+        f"/start - Начать работу\n"
+        f"/menu - Главное меню\n"
+        f"/cancel - Отменить действие\n"
+        f"/help - Эта справка"
     )
     
-    await update.message.reply_text(text, parse_mode="HTML")
-
-# ------------------ ОБРАБОТЧИКИ КНОПОК ------------------
-async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание игры"""
-    query = update.callback_query
-    await query.answer()
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['link']} Перейти в FAQ канал", url=FAQ_CHANNEL_LINK)],
+        [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+    ]
     
-    user_id = str(query.from_user.id)
-    
-    # Создаем пользователя если его нет
-    if user_id not in users_db:
-        users_db[user_id] = {"games": [], "state": None}
-    
-    users_db[user_id]["state"] = "wait_game_name"
-    
-    await query.edit_message_text(
-        f"{EMOJI['create']} <b>Создание игры</b>\n\n"
-        f"Придумай название для своей игры:\n\n"
-        f"<i>Пример:</i> Новогоднее чудо\n"
-        f"<i>Пример:</i> Офисный Санта\n\n"
-        f"Отправь мне название:",
+    await update.message.reply_text(
+        help_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML"
     )
 
+# ------------------ МОИ ИГРЫ ------------------
 async def my_games_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Мои игры"""
+query = update.callback_query
+await query.answer()
+
+user_id = str(query.from_user.id)
+    
+    # Очищаем завершенные игры
+cleanup_finished_games()
+
+    # Находим все активные игры пользователя
+user_games = []
+for game_id, game in storage["games"].items():
+if user_id in game["players"] and not game["started"]:
+user_games.append(game)
+
+if not user_games:
+await query.edit_message_text(
+f"{EMOJI['tree']} <b>У тебя пока нет активных игр</b>\n\n"
+f"Создай новую игру или присоединись к существующей!",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+])
+)
+return
+
+text = f"{EMOJI['list']} <b>Твои игры</b>\n\n"
+buttons = []
+
+for game in user_games[:10]:
+is_owner = f"{EMOJI['crown']} " if game["owner"] == user_id else ""
+game_name = escape_markdown(game["name"])
+        
+text += f"{is_owner}<b>{game_name}</b>\n"
+text += f"   {EMOJI['users']} {len(game['players'])} | {EMOJI['money']} {game['amount']} ₽\n\n"
+        
+        buttons.append([InlineKeyboardButton(f"{game_name[:15]}...", callback_data=f"game_{game['id']}")])
+
+    buttons.append([InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")])
+
+await query.edit_message_text(
+text,
+reply_markup=InlineKeyboardMarkup(buttons),
+parse_mode="HTML"
+)
+
+# ==================== ВОССТАНОВЛЕННЫЕ ОБРАБОТЧИКИ КНОПОК ====================
+
+# ------------------ ПРИСОЕДИНЕНИЕ ------------------
+async def join_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Присоединиться' из главного меню"""
     query = update.callback_query
     await query.answer()
     
-    user_id = str(query.from_user.id)
+    user = get_user(query.from_user.id)
+    user["state"] = "wait_join_code"
+    save_storage()
     
-    # Находим игры пользователя
-    user_games = []
-    for game_id, game in games_db.items():
-        if user_id in game.get("players", []) and not game.get("started", False):
-            user_games.append(game)
-    
-    if not user_games:
-        text = f"{EMOJI['tree']} <b>У тебя пока нет активных игр</b>\n\nСоздай первую игру!"
-        keyboard = [
+    await query.edit_message_text(
+        f"{EMOJI['info']} <b>Для присоединения к игре нужна ссылка от организатора</b>\n\n"
+        f"{EMOJI['santa']} Попроси у организатора игры ссылку-приглашение и просто перейди по ней!\n\n"
+        f"Если ты организатор — создай новую игру или зайди в свои существующие игры.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
-            [InlineKeyboardButton(f"{EMOJI['home']} Назад", callback_data="main_menu")]
-        ]
-    else:
-        text = f"{EMOJI['list']} <b>Твои игры</b>\n\n"
-        keyboard = []
-        
-        for game in user_games[:5]:  # Показываем максимум 5 игр
-            game_name = game["name"]
-            is_owner = f"{EMOJI['crown']} " if game["owner"] == user_id else ""
-            text += f"{is_owner}<b>{game_name}</b>\n"
-            text += f"   {EMOJI['money']} {game['amount']} ₽ | {EMOJI['users']} {len(game['players'])}\n\n"
-            
-            keyboard.append([
-                InlineKeyboardButton(f"{EMOJI['tree']} {game_name[:15]}...", callback_data=f"game_{game['id']}")
-            ])
-        
-        keyboard.append([InlineKeyboardButton(f"{EMOJI['home']} Назад", callback_data="main_menu")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+            [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+        ])
+    )
 
+# ------------------ ДЕТАЛИ ИГРЫ ------------------
 async def game_details_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Детали игры"""
+query = update.callback_query
+await query.answer()
+
+game_id = query.data.split("_")[1]
+game = storage["games"].get(game_id)
+
+if not game or game["started"]:
+await query.edit_message_text(
+f"{EMOJI['cross']} Игра не найдена или уже завершена",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+])
+)
+return
+
+user_id = str(query.from_user.id)
+game_name = escape_markdown(game["name"])
+
+text = (
+f"{EMOJI['tree']} <b>{game_name}</b>\n"
+f"{EMOJI['money']} <b>Бюджет:</b> {game['amount']} ₽\n"
+f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}"
+)
+
+    # Проверяем, есть ли у пользователя пожелания для этой игры
+user = get_user(user_id)
+has_wishes = False
+if "wishes" in user and game_id in user["wishes"]:
+wishes = user["wishes"][game_id]
+if wishes.get("wish") or wishes.get("not_wish"):
+has_wishes = True
+
+keyboard = []
+
+    # Кнопки для владельца
+if user_id == game["owner"]:
+keyboard.append([
+InlineKeyboardButton(f"{EMOJI['link']} Пригласить", callback_data=f"invite_{game_id}"),
+InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
+])
+        keyboard.append([InlineKeyboardButton(f"{EMOJI['play']} Запустить распределение", callback_data=f"start_game_{game_id}")])
+keyboard.append([
+InlineKeyboardButton(f"{EMOJI['edit']} Изменить сумму", callback_data=f"edit_amount_{game_id}"),
+InlineKeyboardButton(f"{EMOJI['trash']} Удалить игру", callback_data=f"delete_{game_id}")
+])
+    # Кнопки для участника (не владельца)
+elif user_id in game["players"]:
+keyboard.append([
+InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
+])
+
+    # Кнопка пожеланий для ВСЕХ участников (включая организатора)
+if user_id in game["players"]:
+wish_button_text = f"{EMOJI['preferences']} Мои пожелания" if has_wishes else f"{EMOJI['wish']} Указать пожелания"
+        keyboard.append([InlineKeyboardButton(wish_button_text, callback_data=f"wish_{game_id}")])
+
+keyboard.append([
+InlineKeyboardButton(f"{EMOJI['back']} К списку игр", callback_data="my_games"),
+InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")
+])
+
+await query.edit_message_text(
+text,
+reply_markup=InlineKeyboardMarkup(keyboard),
+parse_mode="HTML"
+)
+
+# ------------------ УЧАСТНИКИ ИГРЫ ------------------
+async def players_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Участники'"""
     query = update.callback_query
     await query.answer()
     
     game_id = query.data.split("_")[1]
-    game = games_db.get(game_id)
+    game = storage["games"].get(game_id)
     
     if not game:
-        await query.answer("Игра не найдена!", show_alert=True)
+        await query.edit_message_text(
+            f"{EMOJI['cross']} Игра не найдена",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+                [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+            ])
+        )
+        return
+    
+    players_text = f"{EMOJI['users']} <b>Участники ({len(game['players'])}):</b>\n\n"
+    buttons = []
+    
+    for i, uid in enumerate(game["players"], 1):
+        try:
+            user_info = await context.bot.get_chat(int(uid))
+            mention = get_user_html_mention(uid, user_info)
+            
+            # Проверяем, есть ли пожелания у пользователя
+            user = get_user(uid)
+            has_wishes = False
+            if "wishes" in user and game_id in user["wishes"]:
+                wishes = user["wishes"][game_id]
+                if wishes.get("wish") or wishes.get("not_wish"):
+                    has_wishes = True
+            
+            if uid == game["owner"]:
+                players_text += f"{i}. {EMOJI['crown']} {mention}"
+                if has_wishes:
+                    players_text += f" {EMOJI['wish']}"
+            else:
+                players_text += f"{i}. {EMOJI['user']} {mention}"
+                if has_wishes:
+                    players_text += f" {EMOJI['wish']}"
+            
+            players_text += "\n"
+            
+            # Кнопка удаления для владельца (кроме себя)
+            if query.from_user.id == int(game["owner"]) and uid != game["owner"]:
+                name = escape_markdown(user_info.first_name or user_info.username or f"Игрок {i}")
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{EMOJI['cross']} Удалить {name[:15]}",
+                        callback_data=f"kick_{game_id}_{uid}"
+                    )
+                ])
+                
+        except Exception as e:
+            print(f"Ошибка получения пользователя {uid}: {e}")
+            players_text += f"{i}. Игрок {i}\n"
+    
+    game_name = escape_markdown(game["name"])
+    text = f"{EMOJI['tree']} <b>{game_name}</b>\n\n{players_text}"
+    
+    if query.from_user.id == int(game["owner"]):
+        text += f"\n{EMOJI['wish']} - участник указал пожелания"
+    
+    buttons.append([
+        InlineKeyboardButton(f"{EMOJI['back']} Назад", callback_data=f"game_{game_id}"),
+        InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")
+    ])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+async def kick_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик удаления участника"""
+    query = update.callback_query
+    await query.answer()
+    
+    _, game_id, uid = query.data.split("_")
+    game = storage["games"][game_id]
+    
+    if uid in game["players"]:
+        try:
+            user_info = await context.bot.get_chat(int(uid))
+            user_name = escape_markdown(user_info.first_name or user_info.username or "Игрок")
+            game["players"].remove(uid)
+            save_storage()
+            
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"{EMOJI['cross']} <b>Тебя удалили из игры</b>\n\n"
+                    f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
+                    f"{EMOJI['info']} Создатель игры принял решение об твоем удалении.",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+            
+            await query.answer(f"✅ {user_name} удален", show_alert=True)
+        except:
+            game["players"].remove(uid)
+            save_storage()
+            await query.answer("✅ Игрок удален", show_alert=True)
+    
+    await players_cb(update, context)
+
+# ------------------ ИЗМЕНЕНИЕ СУММЫ ------------------
+async def edit_amount_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Изменить сумму'"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[2]
+    game = storage["games"][game_id]
+    
+    if query.from_user.id != int(game["owner"]):
+        await query.answer(f"{EMOJI['cross']} Только создатель игры может менять сумму!", show_alert=True)
+        return
+    
+    user = get_user(query.from_user.id)
+    user["state"] = f"wait_new_amount_{game_id}"
+    save_storage()
+    
+    await query.edit_message_text(
+        f"{EMOJI['edit']} <b>Изменение суммы</b>\n\n"
+        f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
+        f"{EMOJI['money']} Текущая сумма: {game['amount']} ₽\n\n"
+        f"Введи новую сумму:\n\n"
+        f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+        ])
+    )
+
+# ------------------ ЗАПУСК РАСПРЕДЕЛЕНИЯ ------------------
+async def start_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Запустить распределение'"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[2]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
+    
+    if query.from_user.id != int(game["owner"]):
+        await query.answer(f"{EMOJI['cross']} Только создатель игры может запустить распределение!", show_alert=True)
+        return
+    
+    if len(game["players"]) < 2:
+        await query.answer(f"{EMOJI['cross']} Нужно минимум 2 участника!", show_alert=True)
+        return
+    
+    if game["started"]:
+        await query.answer(f"{EMOJI['info']} Распределение уже проведено!", show_alert=True)
+        return
+    
+    # Проводим жеребьёвку
+    players = game["players"][:]
+    random.shuffle(players)
+    
+    pairs = {}
+    for i in range(len(players)):
+        giver = players[i]
+        receiver = players[(i + 1) % len(players)]
+        pairs[giver] = receiver
+    
+    game["pairs"] = pairs
+    game["started"] = True
+    save_storage()
+    
+    # Отправляем сообщения участникам
+    success_count = 0
+    for giver, receiver in pairs.items():
+        try:
+            receiver_info = await context.bot.get_chat(receiver)
+            receiver_mention = get_user_html_mention(receiver, receiver_info)
+            
+            # Получаем пожелания получателя
+            receiver_wishes = ""
+            receiver_user = get_user(receiver)
+            if "wishes" in receiver_user and game_id in receiver_user["wishes"]:
+                wishes = receiver_user["wishes"][game_id]
+                if wishes.get("wish"):
+                    receiver_wishes += f"\n{EMOJI['wish']} <b>Хочет получить:</b>\n{wishes['wish']}\n"
+                if wishes.get("not_wish"):
+                    receiver_wishes += f"\n{EMOJI['not_wish']} <b>Не хочет получать:</b>\n{wishes['not_wish']}\n"
+            
+            message_text = (
+                f"{EMOJI['gift']} <b>Твой Тайный Санта!</b>\n\n"
+                f"{EMOJI['star']} <b>Твой получатель:</b> {receiver_mention}\n"
+                f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
+                f"{EMOJI['tree']} <b>Игра:</b> {escape_markdown(game['name'])}"
+            )
+            
+            if receiver_wishes:
+                message_text += f"\n\n{EMOJI['info']} <b>Пожелания получателя:</b>{receiver_wishes}"
+            
+            message_text += (
+                f"\n\n{EMOJI['santa']} <b>Совет Санты:</b>\n"
+                f"Узнай интересы получателя и прояви креативность!\n\n"
+                f"Счастливого Рождества! 🎄"
+            )
+            
+            await context.bot.send_message(
+                giver,
+                message_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            success_count += 1
+        except Exception as e:
+            print(f"Ошибка отправки сообщения {giver}: {e}")
+    
+    # Отправляем организатору полный список пар
+    try:
+        pairs_list = f"{EMOJI['mail']} <b>Полный список пар (только для тебя):</b>\n\n"
+        for giver, receiver in pairs.items():
+            try:
+                giver_info = await context.bot.get_chat(giver)
+                receiver_info = await context.bot.get_chat(receiver)
+                giver_mention = get_user_html_mention(giver, giver_info)
+                receiver_mention = get_user_html_mention(receiver, receiver_info)
+                
+                pairs_list += f"• {giver_mention} → {receiver_mention}\n"
+            except:
+                pairs_list += f"• Игрок {giver[:4]}... → Игрок {receiver[:4]}...\n"
+        
+        await context.bot.send_message(
+            game["owner"],
+            pairs_list,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Ошибка отправки списка пар организатору: {e}")
+    
+    # Уведомляем участников, которые не указали пожелания
+    for uid in game["players"]:
+        user = get_user(uid)
+        if "wishes" not in user or game_id not in user["wishes"] or not user["wishes"][game_id].get("wish"):
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"{EMOJI['info']} <b>Напоминание о пожеланиях</b>\n\n"
+                    f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' началась!\n\n"
+                    f"{EMOJI['santa']} К сожалению, ты не указал(а) свои пожелания для подарка.\n"
+                    f"Твой Тайный Санта не будет знать, что тебе подарить.\n\n"
+                    f"{EMOJI['wish']} <b>Что можно сделать:</b>\n"
+                    f"• Напиши своему Санте в личные сообщения\n"
+                    f"• Расскажи о своих интересах и предпочтениях\n"
+                    f"• Предложи идеи для подарка\n\n"
+                    f"Удачного обмена подарками! 🎁",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+    
+    # Удаляем игру из общего списка
+    await query.edit_message_text(
+        f"{EMOJI['check']} <b>Распределение проведено!</b>\n\n"
+        f"Участникам отправлены сообщения с их получателями.\n"
+        f"Тебе отправлен полный список пар.\n\n"
+        f"{EMOJI['lock']} <b>Игра завершена и удалена из списка активных.</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+            [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+        ])
+    )
+
+# ------------------ УДАЛЕНИЕ ИГРЫ ------------------
+async def delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Удалить игру'"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[1]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
+    
+    if query.from_user.id != int(game["owner"]):
+        await query.answer(f"{EMOJI['cross']} Только создатель игры может её удалить!", show_alert=True)
+        return
+    
+    # Уведомляем участников
+    for uid in game["players"]:
+        if uid != str(query.from_user.id):
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"{EMOJI['info']} <b>Игра удалена</b>\n\n"
+                    f"{EMOJI['tree']} Игра '{escape_markdown(game['name'])}' была удалена создателем.",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+    
+    storage["games"].pop(game_id, None)
+    save_storage()
+    
+    await query.edit_message_text(
+        f"{EMOJI['check']} <b>Игра удалена</b>\n\n"
+        f"Игра '{escape_markdown(game['name'])}' успешно удалена.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+            [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+        ])
+    )
+
+# ------------------ УПРАВЛЕНИЕ ПОЖЕЛАНИЯМИ ------------------
+async def wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Указать пожелания'"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[1]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
         return
     
     user_id = str(query.from_user.id)
     
-    text = (
-        f"{EMOJI['tree']} <b>{game['name']}</b>\n"
-        f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
-        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}"
-    )
+    if user_id not in game["players"]:
+        await query.answer(f"{EMOJI['cross']} Ты не участник этой игры!", show_alert=True)
+        return
     
-    keyboard = []
+    user = get_user(user_id)
     
-    if user_id == game["owner"]:
-        keyboard.append([
-            InlineKeyboardButton(f"{EMOJI['link']} Пригласить", callback_data=f"invite_{game_id}"),
-            InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
-        ])
-        keyboard.append([InlineKeyboardButton(f"{EMOJI['play']} Запустить игру", callback_data=f"start_{game_id}")])
-        keyboard.append([
-            InlineKeyboardButton(f"{EMOJI['edit']} Изменить сумму", callback_data=f"edit_{game_id}"),
-            InlineKeyboardButton(f"{EMOJI['trash']} Удалить", callback_data=f"delete_{game_id}")
-        ])
-    elif user_id in game["players"]:
-        keyboard.append([InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")])
-        keyboard.append([InlineKeyboardButton(f"{EMOJI['wish']} Пожелания", callback_data=f"wish_{game_id}")])
+    # Проверяем текущие пожелания
+    current_wishes = user.get("wishes", {}).get(game_id, {})
+    wish_text = current_wishes.get("wish", "")
+    not_wish_text = current_wishes.get("not_wish", "")
     
-    keyboard.append([
-        InlineKeyboardButton(f"{EMOJI['back']} Назад", callback_data="my_games"),
-        InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")
-    ])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    if wish_text or not_wish_text:
+        # Показываем текущие пожелания
+        game_name = escape_markdown(game["name"])
+        text = f"{EMOJI['preferences']} <b>Твои пожелания для игры:</b>\n\n"
+        text += f"{EMOJI['tree']} <b>{game_name}</b>\n\n"
+        
+        if wish_text:
+            text += f"{EMOJI['wish']} <b>Хочу получить:</b>\n{wish_text}\n\n"
+        else:
+            text += f"{EMOJI['wish']} <b>Хочу получить:</b>\nНе указано\n\n"
+        
+        if not_wish_text:
+            text += f"{EMOJI['not_wish']} <b>Не хочу получать:</b>\n{not_wish_text}\n"
+        else:
+            text += f"{EMOJI['not_wish']} <b>Не хочу получать:</b>\nНе указано\n"
+        
+        text += f"\n{EMOJI['info']} Эти пожелания увидит твой Тайный Санта после распределения."
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{EMOJI['edit']} Изменить пожелания", callback_data=f"edit_wish_{game_id}")],
+            [InlineKeyboardButton(f"{EMOJI['check']} Оставить как есть", callback_data=f"game_{game_id}")],
+            [InlineKeyboardButton(f"{EMOJI['trash']} Удалить пожелания", callback_data=f"delete_wish_{game_id}")],
+            [InlineKeyboardButton(f"{EMOJI['back']} Назад к игре", callback_data=f"game_{game_id}")]
+        ]
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+    else:
+        # Нет пожеланий, начинаем процесс их создания
+        user["state"] = f"wait_wish_want_{game_id}"
+        save_storage()
+        
+        await query.edit_message_text(
+            f"{EMOJI['wish']} <b>Укажи свои пожелания для подарка</b>\n\n"
+            f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n"
+            f"{EMOJI['money']} Бюджет: {game['amount']} ₽\n\n"
+            f"Напиши, что бы ты хотел(а) получить:\n\n"
+            f"{EMOJI['info']} Примеры:\n"
+            f"• Книга по программированию\n"
+            f"• Тёплый шарф\n"
+            f"• Набор для рисования\n"
+            f"• Сюрприз\n\n"
+            f"Можно написать несколько пунктов.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+            ])
+        )
 
-async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню"""
+async def edit_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Изменить пожелания'"""
     query = update.callback_query
     await query.answer()
+    
+    game_id = query.data.split("_")[2]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
     
     user_id = str(query.from_user.id)
-    if user_id in users_db:
-        users_db[user_id]["state"] = None
+    user = get_user(user_id)
+    user["state"] = f"wait_wish_want_{game_id}"
+    save_storage()
     
-    text = f"{EMOJI['gift']} <b>Главное меню</b>"
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
-        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
-        [InlineKeyboardButton(f"{EMOJI['help']} Помощь", callback_data="help")]
-    ]
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await query.edit_message_text(
+        f"{EMOJI['edit']} <b>Изменение пожеланий</b>\n\n"
+        f"{EMOJI['tree']} Игра: {escape_markdown(game['name'])}\n\n"
+        f"Напиши, что бы ты хотел(а) получить:\n\n"
+        f"{EMOJI['info']} Примеры:\n"
+        f"• Книга по программированию\n"
+        f"• Тёплый шарф\n"
+        f"• Набор для рисования\n"
+        f"• Сюрприз\n\n"
+        f"Можно написать несколько пунктов.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+        ])
+    )
 
-async def help_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Помощь"""
+async def delete_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Удалить пожелания'"""
     query = update.callback_query
     await query.answer()
     
-    text = (
-        f"{EMOJI['help']} <b>Помощь</b>\n\n"
-        f"🎮 <b>Как играть:</b>\n"
-        f"1. Создай игру\n"
-        f"2. Пригласи друзей по ссылке\n"
-        f"3. Запусти распределение\n\n"
-        f"🎅 <b>Бот активен 24/7!</b>\n"
-        f"Игры сохраняются в памяти и не пропадают."
-    )
+    game_id = query.data.split("_")[2]
+    game = storage["games"].get(game_id)
     
-    keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
-    ]
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    user_id = str(query.from_user.id)
+    user = get_user(user_id)
+    
+    if "wishes" in user and game_id in user["wishes"]:
+        del user["wishes"][game_id]
+        save_storage()
+    
+    await query.answer("✅ Пожелания удалены", show_alert=True)
+    await wish_cb(update, context)
 
+async def skip_not_wish_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Пропустить' (не хочу получать)"""
+    query = update.callback_query
+    await query.answer()
+    
+    game_id = query.data.split("_")[3]
+    game = storage["games"].get(game_id)
+    
+    if not game:
+        await query.answer(f"{EMOJI['cross']} Игра не найдена!", show_alert=True)
+        return
+    
+    user_id = str(query.from_user.id)
+    user = get_user(user_id)
+    
+    user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = ""
+    user["state"] = None
+    save_storage()
+    
+    game_name = escape_markdown(game["name"])
+    
+    await query.edit_message_text(
+        f"{EMOJI['check']} <b>Пожелания сохранены!</b>\n\n"
+        f"{EMOJI['tree']} <b>{game_name}</b>\n\n"
+        f"Теперь твой Тайный Санта будет знать, что ты хочешь получить в подарок! 🎁",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['back']} К игре", callback_data=f"game_{game_id}")],
+            [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+        ])
+    )
+
+# ==================== КОНЕЦ ВОССТАНОВЛЕННЫХ ОБРАБОТЧИКОВ ====================
+
+# ------------------ ПРИГЛАШЕНИЕ ------------------
 async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приглашение"""
     query = update.callback_query
     await query.answer()
     
     game_id = query.data.split("_")[1]
-    game = games_db.get(game_id)
+    game = storage["games"].get(game_id)
     
     if not game:
         await query.answer("Игра не найдена!", show_alert=True)
         return
     
     invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
+    game_name = escape_markdown(game["name"])
     
     text = (
         f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
-        f"{EMOJI['tree']} <b>{game['name']}</b>\n"
-        f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+        f"{EMOJI['tree']} <b>{game_name}</b>\n"
+        f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
         f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
-        f"{EMOJI['link']} <b>Ссылка для присоединения:</b>\n"
+        f"{EMOJI['link']} <b>Ссылка для приглашения:</b>\n"
         f"{invite_link}\n\n"
-        f"Отправь эту ссылку друзьям!"
+        f"{EMOJI['snowflake']} Просто отправь эту ссылку друзьям!"
     )
     
     keyboard = [
-        [InlineKeyboardButton(f"{EMOJI['back']} Назад", callback_data=f"game_{game_id}")],
-        [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+        [InlineKeyboardButton(f"{EMOJI['back']} Назад к игре", callback_data=f"game_{game_id}")],
+        [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+
+# ------------------ СОЗДАНИЕ ИГРЫ ------------------
+async def create_game_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+query = update.callback_query
+await query.answer()
+
+user = get_user(query.from_user.id)
+user["state"] = "wait_game_name"
+save_storage()
+
+await query.edit_message_text(
+f"{EMOJI['create']} <b>Создание игры</b>\n\n"
+f"Придумай название для своей игры:\n"
+f"<i>Например:</i> Рождественское чудо\n\n"
+f"Введи название:\n\n"
+f"{EMOJI['info']} <i>Используй /cancel для отмены</i>",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
 
 # ------------------ ТЕКСТОВЫЙ ОБРАБОТЧИК ------------------
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    user_id = str(update.effective_user.id)
-    text = update.message.text.strip()
+user_id = str(update.message.from_user.id)
+user = get_user(user_id)
+
+    print(f"DEBUG: User {user_id} state: {user.get('state')}")
+
+# ---- НАЗВАНИЕ ИГРЫ ----
+if user.get("state") == "wait_game_name":
+name = update.message.text.strip()
+if len(name) < 2:
+await update.message.reply_text(f"{EMOJI['cross']} Слишком короткое название. Минимум 2 символа:")
+return
+
+user["tmp_name"] = name
+user["state"] = "wait_game_amount"
+save_storage()
+
+await update.message.reply_text(
+f"{EMOJI['money']} Сумма подарка\n\nВведи сумму в рублях:\n\n"
+f"{EMOJI['info']} Используй /cancel для отмены",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+# ---- БЮДЖЕТ ИГРЫ ----
+if user.get("state") == "wait_game_amount":
+if "tmp_name" not in user:
+await update.message.reply_text(
+f"{EMOJI['cross']} Ошибка. Начни заново: /menu",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+try:
+text = update.message.text.strip().replace(" ", "").replace(",", ".")
+amount = float(text)
+
+if amount <= 0:
+await update.message.reply_text(
+f"{EMOJI['cross']} Сумма должна быть больше 0. Попробуй снова:",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+if amount > 1000000:
+await update.message.reply_text(
+f"{EMOJI['cross']} Максимум 1,000,000 ₽. Попробуй снова:",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+except ValueError:
+await update.message.reply_text(
+f"{EMOJI['cross']} Это не похоже на число. Пример: 1000 или 1500.50",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+        # Создаем игру
+game_id = gen_game_id()
+
+if amount.is_integer():
+amount_str = str(int(amount))
+else:
+amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
+
+game_name = escape_markdown(user["tmp_name"])
+
+storage["games"][game_id] = {
+"id": game_id,
+"name": user["tmp_name"],
+"amount": amount_str,
+"owner": user_id,
+"players": [user_id],
+"started": False,
+"pairs": {}
+}
+
+del user["tmp_name"]
+user["state"] = None
+user.setdefault("games", []).append(game_id)
+save_storage()
+
+invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
+
+text = (
+f"{EMOJI['tree']}✨ <b>Игра «{game_name}» готова!</b>\n\n"
+f"{EMOJI['money']} <b>Сумма:</b> {amount_str} ₽\n"
+f"{EMOJI['users']} <b>Участников:</b> 1 (включая тебя)\n\n"
+f"{EMOJI['link']} <b>Ссылка для друзей:</b>\n"
+f"{invite_link}\n\n"
+f"{EMOJI['snowflake']} Отправь ссылку друзьям!\n"
+f"{EMOJI['santa']} Когда все соберутся — запусти распределение!"
+)
+
+keyboard = [
+[
+InlineKeyboardButton(f"{EMOJI['link']} Пригласить", callback_data=f"invite_{game_id}"),
+InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
+],
+[InlineKeyboardButton(f"{EMOJI['play']} Запустить распределение", callback_data=f"start_game_{game_id}")],
+[InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
+[InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+]
+
+await update.message.reply_text(
+text,
+reply_markup=InlineKeyboardMarkup(keyboard),
+parse_mode="HTML"
+)
+return
+
+# ---- ПРИСОЕДИНЕНИЕ ПО КОДУ ----
+if user.get("state") == "wait_join_code":
+await update.message.reply_text(
+f"{EMOJI['info']} <b>Для присоединения к игре нужна ссылка от организатора</b>\n\n"
+f"{EMOJI['santa']} Попроси у организатора игры ссылку-приглашение и просто перейди по ней!\n\n"
+f"Если ты организатор — создай новую игру или зайди в свои существующие игры.",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+[InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+# ---- ИЗМЕНЕНИЕ СУММЫ ----
+if user.get("state") and user["state"].startswith("wait_new_amount_"):
+game_id = user["state"].split("_")[-1]
+
+if game_id not in storage["games"]:
+await update.message.reply_text(
+f"{EMOJI['cross']} Игра не найдена.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+game = storage["games"][game_id]
+
+if user_id != game["owner"]:
+await update.message.reply_text(
+f"{EMOJI['cross']} Только создатель игры может менять сумму.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+try:
+text = update.message.text.strip().replace(" ", "").replace(",", ".")
+amount = float(text)
+
+if amount <= 0:
+await update.message.reply_text(
+f"{EMOJI['cross']} Сумма должна быть больше 0. Попробуй снова:",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+except ValueError:
+await update.message.reply_text(
+f"{EMOJI['cross']} Это не похоже на число. Пример: 1000 или 1500.50",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+if amount.is_integer():
+amount_str = str(int(amount))
+else:
+amount_str = f"{amount:.2f}".rstrip('0').rstrip('.')
+
+game["amount"] = amount_str
+user["state"] = None
+save_storage()
+
+game_name = escape_markdown(game["name"])
+
+await update.message.reply_text(
+f"{EMOJI['check']} <b>Сумма обновлена!</b>\n\n"
+f"{EMOJI['tree']} <b>{game_name}</b>\n"
+f"{EMOJI['money']} <b>Бюджет:</b> {game['amount']} ₽\n"
+f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['back']} К игре", callback_data=f"game_{game_id}")],
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+# ---- ПОЖЕЛАНИЯ: ХОЧУ ----
+if user.get("state") and user["state"].startswith("wait_wish_want_"):
+game_id = user["state"].split("_")[-1]
+
+if game_id not in storage["games"]:
+await update.message.reply_text(
+f"{EMOJI['cross']} Игра не найдена.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+wish_text = update.message.text.strip()
+if len(wish_text) > 500:
+await update.message.reply_text(
+f"{EMOJI['cross']} Слишком длинный текст. Максимум 500 символов.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+user.setdefault("wishes", {}).setdefault(game_id, {})["wish"] = wish_text
+user["state"] = f"wait_wish_not_{game_id}"
+save_storage()
+
+await update.message.reply_text(
+f"{EMOJI['check']} <b>Отлично!</b> А теперь напиши, что бы ты НЕ хотел(а) получить:\n\n"
+f"{EMOJI['info']} Примеры:\n"
+f"• Не нужно дарить сладости\n"
+f"• Не люблю красный цвет\n"
+f"• Не дарите носки, пожалуйста\n\n"
+f"Можно написать несколько пунктов или оставить поле пустым.",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['check']} Пропустить", callback_data=f"skip_not_wish_{game_id}")],
+[InlineKeyboardButton(f"{EMOJI['home']} Отмена", callback_data="main_menu")]
+])
+)
+return
+
+# ---- ПОЖЕЛАНИЯ: НЕ ХОЧУ ----
+if user.get("state") and user["state"].startswith("wait_wish_not_"):
+game_id = user["state"].split("_")[-1]
+
+if game_id not in storage["games"]:
+await update.message.reply_text(
+f"{EMOJI['cross']} Игра не найдена.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+user["state"] = None
+save_storage()
+return
+
+not_wish_text = update.message.text.strip()
+if len(not_wish_text) > 500:
+await update.message.reply_text(
+f"{EMOJI['cross']} Слишком длинный текст. Максимум 500 символов.",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+user.setdefault("wishes", {}).setdefault(game_id, {})["not_wish"] = not_wish_text
+user["state"] = None
+save_storage()
+
+game = storage["games"][game_id]
+game_name = escape_markdown(game["name"])
+
+await update.message.reply_text(
+f"{EMOJI['check']} <b>Пожелания сохранены!</b>\n\n"
+f"{EMOJI['tree']} <b>{game_name}</b>\n\n"
+f"Теперь твой Тайный Санта будет знать, что ты хочешь и чего не хочешь получить в подарок! 🎁",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['back']} К игре", callback_data=f"game_{game_id}")],
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+])
+)
+return
+
+# ------------------ ПРИГЛАШЕНИЕ ------------------
+async def invite_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    # Создаем пользователя если его нет
-    if user_id not in users_db:
-        users_db[user_id] = {"games": [], "state": None}
+    game_id = query.data.split("_")[1]
+    game = storage["games"].get(game_id)
     
-    user_state = users_db[user_id].get("state")
-    
-    # ---- СОЗДАНИЕ ИГРЫ: НАЗВАНИЕ ----
-    if user_state == "wait_game_name":
-        if len(text) < 2:
-            await update.message.reply_text("Слишком короткое название. Минимум 2 символа:")
-            return
-        
-        users_db[user_id]["tmp_name"] = text
-        users_db[user_id]["state"] = "wait_game_amount"
-        
-        await update.message.reply_text(
-            f"{EMOJI['money']} Отлично! Теперь введи сумму подарка в рублях:\n\n"
-            f"<i>Пример:</i> 1000\n"
-            f"<i>Пример:</i> 1500.50\n\n"
-            f"Отправь мне сумму:",
-            parse_mode="HTML"
-        )
+    if not game:
+        await query.answer("Игра не найдена!", show_alert=True)
         return
     
-    # ---- СОЗДАНИЕ ИГРЫ: СУММА ----
-    if user_state == "wait_game_amount":
-        try:
-            # Очищаем текст
-            clean_text = text.replace(" ", "").replace(",", ".")
-            amount = float(clean_text)
-            
-            if amount <= 0:
-                await update.message.reply_text("Сумма должна быть больше 0. Попробуй снова:")
-                return
-                
-            if amount > 1000000:
-                await update.message.reply_text("Максимум 1,000,000 ₽. Попробуй снова:")
-                return
-                
-        except ValueError:
-            await update.message.reply_text("Это не похоже на число. Пример: 1000 или 1500.50:")
-            return
-        
-        # СОЗДАЕМ ИГРУ
-        game_id = str(uuid.uuid4())[:8]
-        game_name = users_db[user_id]["tmp_name"]
-        
-        if amount.is_integer():
-            amount_str = str(int(amount))
-        else:
-            amount_str = f"{amount:.2f}"
-        
-        games_db[game_id] = {
-            "id": game_id,
-            "name": game_name,
-            "amount": amount_str,
-            "owner": user_id,
-            "players": [user_id],
-            "started": False,
-            "pairs": {},
-            "created_time": time.time(),
-            "last_modified": time.time()
-        }
-        
-        # Обновляем пользователя
-        users_db[user_id]["games"].append(game_id)
-        users_db[user_id]["state"] = None
-        del users_db[user_id]["tmp_name"]
-        
-        # ОТПРАВЛЯЕМ ОТВЕТ
-        invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
-        
-        response_text = (
-            f"{EMOJI['tree']}✨ <b>Игра создана!</b>\n\n"
-            f"🎄 <b>{game_name}</b>\n"
-            f"💰 <b>Сумма:</b> {amount_str} ₽\n"
-            f"👥 <b>Участников:</b> 1\n\n"
-            f"🔗 <b>Ссылка для друзей:</b>\n"
-            f"{invite_link}\n\n"
-            f"{EMOJI['santa']} Отправь ссылку друзьям!\n"
-            f"{EMOJI['bell']} Когда все соберутся — запусти распределение!"
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton(f"{EMOJI['link']} Пригласить", callback_data=f"invite_{game_id}"),
-                InlineKeyboardButton(f"{EMOJI['users']} Участники", callback_data=f"players_{game_id}")
-            ],
-            [InlineKeyboardButton(f"{EMOJI['play']} Запустить игру", callback_data=f"start_{game_id}")],
-            [InlineKeyboardButton(f"{EMOJI['wish']} Пожелания", callback_data=f"wish_{game_id}")],
-            [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
-            [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
-        ]
-        
-        await update.message.reply_text(
-            response_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="HTML"
-        )
-        
-        print(f"✅ Игра создана: {game_id}, всего игр: {len(games_db)}")
-        return
+    invite_link = f"https://t.me/{context.bot.username}?start={game_id}"
+    game_name = escape_markdown(game["name"])
     
-    # Если не поняли сообщение
-    await update.message.reply_text(
-        f"{EMOJI['info']} Используй кнопки меню для навигации.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
-        ])
+    text = (
+        f"{EMOJI['gift']} <b>Приглашение в игру</b>\n\n"
+        f"{EMOJI['tree']} <b>{game_name}</b>\n"
+        f"{EMOJI['money']} <b>Сумма подарка:</b> {game['amount']} ₽\n"
+        f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+        f"{EMOJI['link']} <b>Ссылка для приглашения:</b>\n"
+        f"{invite_link}\n\n"
+        f"{EMOJI['snowflake']} Просто отправь эту ссылку друзьям!"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['back']} Назад к игре", callback_data=f"game_{game_id}")],
+        [InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+    ]
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
     )
 
-# ------------------ ПРИСОЕДИНЕНИЕ ПО ССЫЛКЕ ------------------
-async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка /start с параметром (пригласительная ссылка)"""
-    args = context.args
-    
-    if args and len(args[0]) == 8:
-        game_id = args[0]
-        game = games_db.get(game_id)
-        
-        if not game:
-            await update.message.reply_text(
-                f"{EMOJI['cross']} <b>Игра не найдена!</b>\n\n"
-                f"Ссылка устарела или игра была удалена.",
-                parse_mode="HTML"
-            )
-            return
-        
-        if game.get("started", False):
-            await update.message.reply_text(
-                f"{EMOJI['cross']} <b>Игра уже началась!</b>\n\n"
-                f"Распределение уже проведено, присоединиться нельзя.",
-                parse_mode="HTML"
-            )
-            return
-        
-        user_id = str(update.effective_user.id)
-        
-        if user_id in game["players"]:
-            await update.message.reply_text(
-                f"{EMOJI['info']} <b>Ты уже в игре!</b>\n\n"
-                f"🎄 <b>{game['name']}</b>\n"
-                f"💰 {game['amount']} ₽\n"
-                f"👥 Участников: {len(game['players'])}\n\n"
-                f"Ждем начала распределения!",
-                parse_mode="HTML"
-            )
-            return
-        
-        # Добавляем пользователя в игру
-        game["players"].append(user_id)
-        game["last_modified"] = time.time()
-        
-        # Добавляем игру пользователю
-        if user_id not in users_db:
-            users_db[user_id] = {"games": [], "state": None}
-        users_db[user_id]["games"].append(game_id)
-        
-        await update.message.reply_text(
-            f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
-            f"🎄 <b>{game['name']}</b>\n"
-            f"💰 <b>Сумма:</b> {game['amount']} ₽\n"
-            f"👥 <b>Участников:</b> {len(game['players'])}\n\n"
-            f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
-            parse_mode="HTML"
-        )
-        
-        print(f"✅ Пользователь {user_id} присоединился к игре {game_id}")
-    else:
-        await start(update, context)
+# ------------------ ГЛАВНОЕ МЕНЮ (колбэк) ------------------
+async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+query = update.callback_query
+await query.answer()
 
-# ------------------ FASTAPI ------------------
+user = get_user(query.from_user.id)
+user["state"] = None
+if "tmp_name" in user:
+del user["tmp_name"]
+if "tmp_game_id" in user:
+del user["tmp_game_id"]
+save_storage()
+
+welcome_text = (
+f"{EMOJI['gift']} <b>Тайный Санта</b>\n\n"
+f"Создай свою игру или присоединись к существующей.\n"
+f"Когда все соберутся — запусти распределение!"
+)
+
+keyboard = [
+[InlineKeyboardButton(f"{EMOJI['create']} Создать игру", callback_data="create_game")],
+[InlineKeyboardButton(f"{EMOJI['join']} Присоединиться", callback_data="join_game")],
+        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")],
+        [InlineKeyboardButton(f"{EMOJI['help']} FAQ и инструкции", url=FAQ_CHANNEL_LINK)],
+]
+
+await query.edit_message_text(
+welcome_text,
+reply_markup=InlineKeyboardMarkup(keyboard),
+parse_mode="HTML"
+)
+
+# ------------------ ОБРАБОТКА ПРИГЛАСИТЕЛЬНОЙ ССЫЛКИ ------------------
+async def handle_start_with_param(update: Update, context: ContextTypes.DEFAULT_TYPE):
+"""Обработка команды /start с параметром (пригласительная ссылка)"""
+args = context.args
+    if args and len(args[0]) == 8:
+game_id = args[0]
+game = storage["games"].get(game_id)
+
+if not game:
+await update.message.reply_text(
+f"{EMOJI['cross']} <b>Игра не найдена!</b>\n\n"
+f"Ссылка устарела или игра была удалена.",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+if game["started"]:
+await update.message.reply_text(
+f"{EMOJI['cross']} <b>Игра уже началась!</b>\n\n"
+f"Распределение уже проведено, присоединиться нельзя.",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+user_id = str(update.effective_user.id)
+
+if user_id in game["players"]:
+await update.message.reply_text(
+f"{EMOJI['info']} <b>Ты уже в игре!</b>\n\n"
+f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
+f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+f"Ждем начала распределения!",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Меню", callback_data="main_menu")]
+])
+)
+return
+
+        # Добавляем в игру
+game["players"].append(user_id)
+user = get_user(user_id)
+user.setdefault("games", []).append(game_id)
+save_storage()
+
+        # Уведомляем создателя
+try:
+await context.bot.send_message(
+game["owner"],
+f"{EMOJI['bell']} <b>Новый участник!</b>\n\n"
+f"К игре '{escape_markdown(game['name'])}' присоединился новый участник.\n"
+f"{EMOJI['users']} Теперь участников: {len(game['players'])}",
+parse_mode="HTML"
+)
+except:
+pass
+
+        # Отправляем стандартное сообщение о вступлении
+await update.message.reply_text(
+f"{EMOJI['check']} <b>Ты присоединился к игре!</b>\n\n"
+f"{EMOJI['tree']} <b>{escape_markdown(game['name'])}</b>\n"
+f"{EMOJI['money']} <b>Сумма:</b> {game['amount']} ₽\n"
+f"{EMOJI['users']} <b>Участников:</b> {len(game['players'])}\n\n"
+f"{EMOJI['santa']} Ждем, когда создатель запустит распределение!",
+parse_mode="HTML",
+reply_markup=InlineKeyboardMarkup([
+[InlineKeyboardButton(f"{EMOJI['home']} Главное меню", callback_data="main_menu")]
+])
+)
+
+        # ОТДЕЛЬНО отправляем информационное сообщение о пожеланиях (через 1 секунду)
+        async def send_info_message():
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"{EMOJI['info']} <b>Важная информация!</b>\n\n"
+                    f"🎯 <b>Укажи свои пожелания для подарка!</b>\n\n"
+                    f"Чтобы твой Тайный Санта знал, что тебе дарить, ты можешь указать свои пожелания:\n\n"
+                    f"🎁 <b>Что бы ты хотел(а) получить</b>\n"
+                    f"🙅 <b>Что бы ты НЕ хотел(а) получать</b>\n\n"
+                    f"Эти пожелания увидит только твой Тайный Санта после распределения.\n\n"
+                    f"<i>Зайди в свои игры и нажми кнопку \"Указать пожелания\" для игры:</i>\n"
+                    f"<b>{escape_markdown(game['name'])}</b>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
+                        [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")]
+                    ])
+                )
+            except Exception as e:
+                print(f"Ошибка отправки информационного сообщения: {e}")
+        
+        # Запускаем отправку с небольшой задержкой
+        import asyncio
+        asyncio.create_task(send_info_message())
+        
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"{EMOJI['info']} <b>🎯 Укажи свои пожелания для подарка!</b>\n\n"
+                f"Чтобы твой Тайный Санта знал, что тебе дарить:\n\n"
+                f"✅ <b>Что бы ты хотел(а) получить</b>\n"
+                f"❌ <b>Что бы ты НЕ хотел(а) получать</b>\n\n"
+                f"<i>Эти пожелания увидит только твой Тайный Санта.</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{EMOJI['wish']} Указать пожелания", callback_data=f"wish_{game_id}")],
+                    [InlineKeyboardButton(f"{EMOJI['list']} Мои игры", callback_data="my_games")]
+                ])
+            )
+        except Exception as e:
+            print(f"Ошибка отправки информационного сообщения: {e}")
+            
+else:
+await start(update, context)
+
+# ------------------ WEBHOOK & FASTAPI ------------------
+application = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan контекст для FastAPI"""
-    global application
+"""Lifespan контекст для FastAPI"""
+global application
+
+print("🎅 Инициализация Тайного Санты...")
+
+    # Очищаем завершенные игры при старте
+cleanup_finished_games()
     
-    print("=" * 50)
-    print("🎅 Инициализация Тайного Санты...")
-    print("=" * 50)
-    
-    # Проверяем токен
-    if not BOT_TOKEN:
-        print("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен!")
-        raise RuntimeError("BOT_TOKEN не установлен")
-    
-    # Создаем приложение Telegram
-    print("🤖 Создаю приложение Telegram...")
-    try:
-        application = Application.builder().token(BOT_TOKEN).build()
-        print("✅ Приложение создано")
-    except Exception as e:
-        print(f"❌ Ошибка создания приложения: {e}")
-        raise
-    
-    # Регистрируем обработчики
-    print("📝 Регистрирую обработчики...")
-    try:
-        # Команды
-        application.add_handler(CommandHandler("start", handle_start_with_param))
-        application.add_handler(CommandHandler("menu", menu_command))
-        application.add_handler(CommandHandler("help", help_command))
-        
-        # Callback кнопки
-        application.add_handler(CallbackQueryHandler(create_game_cb, pattern="create_game"))
-        application.add_handler(CallbackQueryHandler(my_games_cb, pattern="my_games"))
-        application.add_handler(CallbackQueryHandler(game_details_cb, pattern="game_"))
-        application.add_handler(CallbackQueryHandler(main_menu_cb, pattern="main_menu"))
-        application.add_handler(CallbackQueryHandler(help_cb, pattern="help"))
-        application.add_handler(CallbackQueryHandler(invite_cb, pattern="invite_"))
-        
-        # Текстовые сообщения
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-        
-        print("✅ Обработчики зарегистрированы")
-    except Exception as e:
-        print(f"❌ Ошибка регистрации обработчиков: {e}")
-        raise
-    
-    # Инициализируем
-    print("⚙️ Инициализирую приложение...")
-    try:
-        await application.initialize()
-        print("✅ Приложение инициализировано")
-    except Exception as e:
-        print(f"❌ Ошибка инициализации: {e}")
-        raise
-    
-    # Настраиваем webhook если есть URL
-    if WEBHOOK_URL:
-        print(f"🌐 Настраиваю webhook: {WEBHOOK_URL}")
-        try:
-            await application.bot.set_webhook(WEBHOOK_URL)
-            print("✅ Webhook установлен")
-        except Exception as e:
-            print(f"❌ Ошибка установки webhook: {e}")
-    else:
-        print("ℹ️ Webhook не настроен")
-    
-    # Запускаем активный пинг
-    print("🔔 Запускаю активный пинг...")
-    try:
-        ping_thread = threading.Thread(target=active_ping, daemon=True)
-        ping_thread.start()
-        print("✅ Активный пинг запущен")
-    except Exception as e:
-        print(f"⚠️  Ошибка запуска пинга: {e}")
-    
-    print("=" * 50)
-    print(f"📊 Статистика:")
-    print(f"   🎮 Игр в памяти: {len(games_db)}")
-    print(f"   👤 Пользователей: {len(users_db)}")
-    print("=" * 50)
-    print("🎅 Тайный Санта готов к работе!")
-    print("=" * 50)
-    
-    yield
-    
-    print("🎄 Останавливаю бота...")
-    if application:
-        await application.shutdown()
-    print("✅ Бот остановлен")
+    # Создаем и инициализируем Application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# Регистрация обработчиков
+application.add_handler(CommandHandler("start", handle_start_with_param))
+application.add_handler(CommandHandler("menu", menu_command))
+application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CallbackQueryHandler(create_game_cb, pattern="create_game"))
+application.add_handler(CallbackQueryHandler(join_game_cb, pattern="join_game"))
+application.add_handler(CallbackQueryHandler(my_games_cb, pattern="my_games"))
+application.add_handler(CallbackQueryHandler(game_details_cb, pattern="game_"))
+application.add_handler(CallbackQueryHandler(invite_cb, pattern="invite_"))
+application.add_handler(CallbackQueryHandler(players_cb, pattern="players_"))
+application.add_handler(CallbackQueryHandler(kick_cb, pattern="kick_"))
+application.add_handler(CallbackQueryHandler(delete_cb, pattern="delete_"))
+application.add_handler(CallbackQueryHandler(edit_amount_cb, pattern="edit_amount_"))
+application.add_handler(CallbackQueryHandler(start_game_cb, pattern="start_game_"))
+application.add_handler(CallbackQueryHandler(main_menu_cb, pattern="main_menu"))
+application.add_handler(CallbackQueryHandler(wish_cb, pattern="wish_"))
+application.add_handler(CallbackQueryHandler(edit_wish_cb, pattern="edit_wish_"))
+application.add_handler(CallbackQueryHandler(delete_wish_cb, pattern="delete_wish_"))
+application.add_handler(CallbackQueryHandler(skip_not_wish_cb, pattern="skip_not_wish_"))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Инициализируем Application
+await application.initialize()
+
+    # Устанавливаем webhook
+if WEBHOOK_URL:
+await application.bot.set_webhook(WEBHOOK_URL)
+print(f"✅ Webhook установлен на {WEBHOOK_URL}")
+
+print(f"✅ Тайный Санта готов! Всего пользователей: {len(storage['users'])}")
+    print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
+
+yield
+
+print("🎄 Остановка бота...")
+if application:
+await application.shutdown()
+print("✅ Бот остановлен")
 
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook")
 async def webhook(req: Request):
-    """Endpoint для webhook"""
-    global application
-    
-    if not application:
-        return {"ok": False, "error": "Приложение не инициализировано"}, 500
-    
-    try:
-        data = await req.json()
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return {"ok": True}
-    except Exception as e:
-        print(f"❌ Ошибка в webhook: {e}")
-        return {"ok": False, "error": str(e)}, 500
+"""Endpoint для получения обновлений от Telegram"""
+global application
+
+if not application:
+return {"ok": False, "error": "Application not initialized"}, 500
+
+try:
+data = await req.json()
+update = Update.de_json(data, application.bot)
+await application.process_update(update)
+return {"ok": True}
+except Exception as e:
+print(f"Ошибка в webhook: {e}")
+return {"ok": False, "error": str(e)}, 500
 
 @app.get("/")
-async def root():
-    """Главная страница"""
-    return {
-        "status": "online",
-        "service": "secret-santa-bot",
-        "games": len(games_db),
-        "users": len(users_db),
-        "timestamp": time.time(),
-        "message": "🎅 Тайный Санта активен! Активный пинг включен.",
-        "active_ping": "enabled",
-        "ping_interval": "120 seconds"
-    }
+async def health_check():
+"""Health check endpoint"""
+return {
+"status": "ok", 
+"message": "🎅 Тайный Санта работает",
+"games_count": len(storage["games"]),
+"users_count": len(storage["users"]),
+        "active_games": len([g for g in storage["games"].values() if not g["started"]]),
+        "faq_channel": FAQ_CHANNEL_LINK
+}
 
-@app.get("/ping")
-async def ping():
-    """Простой ping"""
-    return {
-        "status": "pong",
-        "timestamp": time.time(),
-        "message": "Бот активен"
-    }
-
-@app.get("/wakeup")
-async def wakeup():
-    """Пробуждение"""
-    return {
-        "status": "awake",
-        "timestamp": time.time(),
-        "message": "🎅 Бот бодрствует благодаря активному пингу!",
-        "games_count": len(games_db),
-        "users_count": len(users_db)
-    }
-
-@app.get("/status")
-async def status():
-    """Статус"""
-    active_games = len([g for g in games_db.values() if not g.get("started", False)])
-    finished_games = len([g for g in games_db.values() if g.get("started", False)])
-    
-    return {
-        "status": "active",
-        "memory_storage": "enabled",
-        "active_ping": "enabled",
-        "statistics": {
-            "total_games": len(games_db),
-            "active_games": active_games,
-            "finished_games": finished_games,
-            "total_users": len(users_db)
-        },
-        "last_update": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "timestamp": time.time()
-    }
-
-@app.get("/debug")
-async def debug():
-    """Отладочная информация"""
-    return {
-        "storage": "in_memory",
-        "games": list(games_db.keys()),
-        "users_count": len(users_db),
-        "games_count": len(games_db),
-        "timestamp": time.time(),
-        "active_ping": True,
-        "environment": {
-            "render": "RENDER_EXTERNAL_URL" in os.environ,
-            "railway": "RAILWAY_STATIC_URL" in os.environ,
-            "heroku": "HEROKU_APP_NAME" in os.environ
-        }
-    }
-
-# ------------------ ЗАПУСК ------------------
+# ------------------ MAIN ------------------
 def main():
-    """Главная функция"""
-    print("=" * 50)
-    print("🚀 ЗАПУСК ТАЙНОГО САНТЫ")
-    print("=" * 50)
-    print("🔥 ОСОБЕННОСТИ:")
-    print("• Активный пинг каждые 2 минуты")
-    print("• Хранилище в оперативной памяти")
-    print("• Простая и надежная работа")
-    print("• Не спит благодаря активному пингу")
-    print("=" * 50)
-    
-    # Определяем хостинг
-    if "RENDER_EXTERNAL_URL" in os.environ:
-        print(f"🎨 Хостинг: Render")
-        print(f"🌐 URL: {os.environ['RENDER_EXTERNAL_URL']}")
-    elif "RAILWAY_STATIC_URL" in os.environ:
-        print(f"🚂 Хостинг: Railway")
-        print(f"🌐 URL: https://{os.environ['RAILWAY_STATIC_URL']}")
-    elif "HEROKU_APP_NAME" in os.environ:
-        print(f"⚡ Хостинг: Heroku")
-        print(f"🌐 URL: https://{os.environ['HEROKU_APP_NAME']}.herokuapp.com")
-    else:
-        print(f"💻 Режим: Локальная разработка")
-    
-    print(f"🔧 Порт: {PORT}")
-    print(f"🔑 BOT_TOKEN: {'✅ Установлен' if BOT_TOKEN else '❌ Отсутствует'}")
-    print(f"🌐 WEBHOOK_URL: {'✅ Установлен' if WEBHOOK_URL else '❌ Отсутствует'}")
-    print("=" * 50)
-    
-    try:
-        uvicorn.run(
-            app, 
-            host="0.0.0.0", 
-            port=PORT,
-            log_level="info"
-        )
-    except Exception as e:
-        print(f"❌ Ошибка запуска сервера: {e}")
-        raise
+"""Запуск FastAPI приложения"""
+print(f"🎄 Запуск на порту {PORT}")
+    print(f"📊 Всего пользователей в системе: {len(storage['users'])}")
+    print(f"🎮 Всего игр в системе: {len(storage['games'])}")
+    print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
+uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    main()
+main()
