@@ -3,6 +3,8 @@ import os
 import uuid
 import random
 import time
+import threading
+import requests
 from contextlib import asynccontextmanager
 from telegram import (
     Update,
@@ -99,7 +101,7 @@ def load_storage():
                 data["users"] = {}
             return data
     except (json.JSONDecodeError, IOError) as e:
-        print(f"Ошибка загрузки storage.json: {e}")
+        print(f"❌ Ошибка загрузки storage.json: {e}")
         return {"games": {}, "users": {}}
 
 def save_storage(data):
@@ -141,6 +143,74 @@ def cleanup_old_games(data, days_old=30):
         print(f"🗑️ Удалено старых игр (>{days_old} дней): {len(games_to_remove)}")
     
     return data
+
+# ------------------ KEEP-ALIVE СИСТЕМА ------------------
+def keep_alive_robust():
+    """Надежный keep-alive для предотвращения сна бота"""
+    print("🔔 Keep-alive система запущена")
+    
+    # Определяем URL для пинга
+    base_url = os.getenv("HEALTH_CHECK_URL")
+    
+    if not base_url:
+        # Пытаемся определить URL автоматически
+        if "RAILWAY_STATIC_URL" in os.environ:
+            base_url = f"https://{os.environ['RAILWAY_STATIC_URL']}"
+        elif "RENDER_EXTERNAL_URL" in os.environ:
+            base_url = os.environ['RENDER_EXTERNAL_URL']
+        elif "VERCEL_URL" in os.environ:
+            base_url = f"https://{os.environ['VERCEL_URL']}"
+        else:
+            # Локальная разработка - используем localhost
+            base_url = f"http://localhost:{PORT}"
+    
+    # Убедимся, что URL заканчивается на /
+    if not base_url.endswith('/'):
+        base_url += '/'
+    
+    health_url = base_url
+    wakeup_url = base_url + "wakeup" if base_url.endswith('/') else base_url + "/wakeup"
+    
+    print(f"🔗 Будем пинговать: {health_url}")
+    
+    while True:
+        try:
+            current_time = time.strftime("%H:%M:%S")
+            
+            # Пробуем основной endpoint
+            response = requests.get(health_url, timeout=30)
+            if response.status_code == 200:
+                print(f"✅ [{current_time}] Бот активен (статус: {response.status_code})")
+            else:
+                print(f"⚠️  [{current_time}] Неожиданный статус: {response.status_code}")
+                
+                # Если основной не отвечает нормально, пробуем wakeup
+                try:
+                    wakeup_response = requests.get(wakeup_url, timeout=30)
+                    print(f"🔔 [{current_time}] Wakeup вызван: {wakeup_response.status_code}")
+                except:
+                    print(f"❌ [{current_time}] Wakeup не сработал")
+                    
+        except requests.exceptions.Timeout:
+            current_time = time.strftime("%H:%M:%S")
+            print(f"⏰ [{current_time}] Таймаут при ping")
+            
+            # При таймауте пробуем wakeup
+            try:
+                wakeup_response = requests.get(wakeup_url, timeout=30)
+                print(f"🔔 [{current_time}] Wakeup после таймаута: {wakeup_response.status_code}")
+            except:
+                print(f"❌ [{current_time}] Wakeup после таймаута не сработал")
+                
+        except requests.exceptions.ConnectionError:
+            current_time = time.strftime("%H:%M:%S")
+            print(f"🔌 [{current_time}] Ошибка соединения")
+        except Exception as e:
+            current_time = time.strftime("%H:%M:%S")
+            print(f"❌ [{current_time}] Ошибка: {type(e).__name__}")
+        
+        # Ждем 4 минуты (меньше чем стандартный таймаут хостингов)
+        time.sleep(240)  # 240 секунд = 4 минуты
 
 # ------------------ УТИЛИТЫ ------------------
 def gen_game_id():
@@ -1534,6 +1604,13 @@ async def lifespan(app: FastAPI):
     print(f"👤 Всего пользователей: {len(data['users'])}")
     print(f"📖 FAQ канал: {FAQ_CHANNEL_LINK}")
     
+    # Запускаем keep-alive систему
+    if "localhost" not in os.getenv("HEALTH_CHECK_URL", ""):
+        print("🔔 Запускаем keep-alive систему...")
+        keep_alive_thread = threading.Thread(target=keep_alive_robust, daemon=True)
+        keep_alive_thread.start()
+        print("✅ Keep-alive система запущена")
+    
     yield
     
     print("🎄 Остановка бота...")
@@ -1574,26 +1651,120 @@ async def health_check():
         "active_games": active_games,
         "finished_games": finished_games,
         "users_count": len(data["users"]),
-        "faq_channel": FAQ_CHANNEL_LINK
+        "faq_channel": FAQ_CHANNEL_LINK,
+        "timestamp": time.time()
+    }
+
+@app.get("/wakeup")
+async def wakeup():
+    """Endpoint для принудительного пробуждения бота"""
+    data = load_storage()
+    active_games = len([g for g in data["games"].values() if not g.get("started", False)])
+    
+    return {
+        "status": "awake",
+        "timestamp": time.time(),
+        "active_games": active_games,
+        "message": "🎅 Тайный Санта бодрствует!",
+        "keep_alive": "active"
+    }
+
+@app.get("/ping")
+async def ping():
+    """Простой ping-pong endpoint"""
+    return {
+        "status": "pong", 
+        "timestamp": time.time(),
+        "service": "secret-santa-bot"
+    }
+
+@app.get("/status")
+async def status():
+    """Полный статус бота"""
+    data = load_storage()
+    
+    # Статистика по играм
+    active_games = []
+    finished_games = []
+    
+    for game_id, game in data["games"].items():
+        if not game.get("started", False):
+            active_games.append({
+                "id": game_id,
+                "name": game["name"],
+                "players": len(game["players"]),
+                "amount": game["amount"]
+            })
+        else:
+            finished_games.append({
+                "id": game_id,
+                "name": game["name"],
+                "players": len(game["players"]),
+                "finished_time": game.get("finished_time")
+            })
+    
+    return {
+        "status": "operational",
+        "timestamp": time.time(),
+        "statistics": {
+            "total_games": len(data["games"]),
+            "active_games": len(active_games),
+            "finished_games": len(finished_games),
+            "total_users": len(data["users"])
+        },
+        "system": {
+            "storage_file": STORAGE_FILE,
+            "port": PORT,
+            "webhook_enabled": bool(WEBHOOK_URL)
+        }
     }
 
 # ------------------ MAIN ------------------
 def main():
     """Запуск FastAPI приложения"""
-    print(f"🎄 Запуск на порту {PORT}")
+    print(f"🎄 Запуск Тайного Санты на порту {PORT}")
+    print("=" * 50)
     
-    data = load_storage()
-    print(f"📊 Всего пользователей: {len(data['users'])}")
-    print(f"🎮 Всего игр: {len(data['games'])}")
+    # Загружаем и показываем статистику
+    try:
+        data = load_storage()
+        print(f"📊 Всего пользователей: {len(data['users'])}")
+        print(f"🎮 Всего игр: {len(data['games'])}")
+        
+        active_games = len([g for g in data["games"].values() if not g.get("started", False)])
+        finished_games = len([g for g in data["games"].values() if g.get("started", False)])
+        
+        print(f"   Активных игр: {active_games}")
+        print(f"   Завершенных игр: {finished_games}")
+    except Exception as e:
+        print(f"⚠️  Ошибка загрузки статистики: {e}")
     
-    active_games = len([g for g in data["games"].values() if not g.get("started", False)])
-    finished_games = len([g for g in data["games"].values() if g.get("started", False)])
+    print(f"📖 FAQ канал: {FAQ_CHANNEL_LINK}")
+    print("=" * 50)
     
-    print(f"   Активных: {active_games}")
-    print(f"   Завершенных: {finished_games}")
-    print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
+    # Определяем, на каком хостинге мы
+    if "RAILWAY_STATIC_URL" in os.environ:
+        print(f"🚂 Хостинг: Railway")
+        print(f"🌐 URL: https://{os.environ['RAILWAY_STATIC_URL']}")
+    elif "RENDER_EXTERNAL_URL" in os.environ:
+        print(f"🎨 Хостинг: Render")
+        print(f"🌐 URL: {os.environ['RENDER_EXTERNAL_URL']}")
+    elif "VERCEL_URL" in os.environ:
+        print(f"▲ Хостинг: Vercel")
+        print(f"🌐 URL: https://{os.environ['VERCEL_URL']}")
+    else:
+        print(f"💻 Локальная разработка")
     
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    print("=" * 50)
+    
+    # Запускаем сервер
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=PORT,
+        access_log=True,
+        log_level="info"
+    )
 
 if __name__ == "__main__":
     main()
