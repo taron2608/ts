@@ -20,6 +20,8 @@ from telegram.ext import (
 )
 from fastapi import FastAPI, Request
 import uvicorn
+import threading
+import requests
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -27,6 +29,9 @@ PORT = int(os.environ.get("PORT", 10000))
 STORAGE_FILE = "storage.json"
 BACKUP_FILE = "storage_backup.json"
 FAQ_CHANNEL_LINK = "https://t.me/ssr_faq"
+
+# Константы для предотвращения сна
+PING_INTERVAL = 300  # 5 минут в секундах
 
 EMOJI = {
     "santa": "🎅",
@@ -246,7 +251,39 @@ def cleanup_finished_games():
     
     return removed_count
 
-# КОМАНДЫ
+# ========== ФУНКЦИИ ДЛЯ ПРЕДОТВРАЩЕНИЯ СНА ==========
+
+def ping_self():
+    """Пингует собственный сервер для предотвращения сна"""
+    try:
+        # Пингуем собственный эндпоинт
+        base_url = WEBHOOK_URL.replace('/webhook', '') if WEBHOOK_URL else f"http://localhost:{PORT}"
+        response = requests.get(f"{base_url}/", timeout=10)
+        print(f"✅ Самопинг: {response.status_code}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка самопинга: {e}")
+        return False
+
+def start_ping_loop():
+    """Запускает фоновый поток для периодического пинга"""
+    def ping_worker():
+        while True:
+            try:
+                ping_self()
+                safe_save()
+                time.sleep(PING_INTERVAL)  # Спим 5 минут
+            except Exception as e:
+                print(f"❌ Ошибка в пинг-воркере: {e}")
+                time.sleep(60)  # При ошибке ждем 1 минуту
+    
+    # Запускаем в фоновом потоке
+    ping_thread = threading.Thread(target=ping_worker, daemon=True)
+    ping_thread.start()
+    print(f"📡 Фоновый пинг запущен (интервал: {PING_INTERVAL} сек)")
+
+# ========== КОМАНДЫ ==========
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.effective_user.id)
     user["state"] = None
@@ -362,7 +399,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💾 <b>Система:</b>\n"
         f"• Последнее сохранение: {last_save}\n"
         f"• Размер файла данных: {os.path.getsize(STORAGE_FILE) if os.path.exists(STORAGE_FILE) else 0} байт\n"
-        f"• Есть бэкап: {'✅' if os.path.exists(BACKUP_FILE) else '❌'}"
+        f"• Есть бэкап: {'✅' if os.path.exists(BACKUP_FILE) else '❌'}\n"
+        f"• Пинг-система: {'✅ активна' if 'ping_active' in storage.get('_metadata', {}) else '❌ неактивна'}"
     )
     
     await update.message.reply_text(
@@ -1482,9 +1520,20 @@ async def lifespan(app: FastAPI):
         await application.bot.set_webhook(WEBHOOK_URL)
         print(f"✅ Webhook установлен на {WEBHOOK_URL}")
 
+    # Запускаем фоновый пинг для предотвращения сна
+    start_ping_loop()
+    
+    # Отмечаем, что пинг-система активна
+    if "_metadata" not in storage:
+        storage["_metadata"] = {}
+    storage["_metadata"]["ping_active"] = True
+    storage["_metadata"]["ping_started"] = time.time()
+    safe_save()
+
     print(f"✅ Тайный Санта готов!")
     print(f"📚 FAQ канал: {FAQ_CHANNEL_LINK}")
     print(f"💾 Автосохранение: включено (бэкапы в {BACKUP_FILE})")
+    print(f"📡 Система предотвращения сна: ✅ активна (пинг каждые {PING_INTERVAL} сек)")
 
     yield
 
@@ -1516,12 +1565,17 @@ async def webhook(req: Request):
 
 @app.get("/")
 async def health_check():
+    """Основной эндпоинт для проверки работы и пинга"""
     active_games = len([g for g in storage["games"].values() if not g.get("started")])
     finished_games = len([g for g in storage["games"].values() if g.get("started")])
     
     last_save = storage.get("_metadata", {}).get("last_save", "неизвестно")
     if isinstance(last_save, (int, float)):
         last_save = datetime.fromtimestamp(last_save).strftime("%Y-%m-%d %H:%M:%S")
+    
+    ping_started = storage.get("_metadata", {}).get("ping_started", "неизвестно")
+    if isinstance(ping_started, (int, float)):
+        ping_started = datetime.fromtimestamp(ping_started).strftime("%Y-%m-%d %H:%M:%S")
     
     return {
         "status": "ok", 
@@ -1531,9 +1585,23 @@ async def health_check():
         "finished_games": finished_games,
         "users_count": len(storage["users"]),
         "last_save": last_save,
+        "ping_system": "активна" if storage.get("_metadata", {}).get("ping_active") else "неактивна",
+        "ping_started": ping_started,
+        "ping_interval": PING_INTERVAL,
         "faq_channel": FAQ_CHANNEL_LINK,
         "storage_file": STORAGE_FILE,
         "backup_file": BACKUP_FILE if os.path.exists(BACKUP_FILE) else "не создан"
+    }
+
+@app.get("/ping")
+async def ping_endpoint():
+    """Специальный эндпоинт для внешних пингов (cron, uptimerobot)"""
+    return {
+        "status": "ok",
+        "message": "🏓 Понг! Бот активен",
+        "timestamp": datetime.now().isoformat(),
+        "games_count": len(storage["games"]),
+        "users_count": len(storage["users"])
     }
 
 @app.get("/backup")
@@ -1574,6 +1642,14 @@ def main():
     except Exception as e:
         print(f"❌ Ошибка записи на диск: {e}")
         print("⚠️  Возможны проблемы с сохранением данных!")
+    
+    print(f"📡 Система предотвращения сна:")
+    print(f"   • Интервал пинга: {PING_INTERVAL} секунд")
+    print(f"   • Эндпоинт для пинга: /ping")
+    print(f"   • Главный эндпоинт: /")
+    print("⚙️  Настройте внешние сервисы:")
+    print("   • Cron-job: */5 * * * * curl -s https://ваш-домен/ping")
+    print("   • UptimeRobot: мониторьте https://ваш-домен/")
     
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
